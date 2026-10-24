@@ -42,6 +42,13 @@ DEFAULTS = {
         "startup dan produk digital",
     ],
 
+    # like sebelum komentar
+    "like_before_comment":  True,
+
+    # auto-reply ke balasan
+    "auto_reply_enabled":          False,
+    "auto_reply_check_minutes":    30,
+
     # qoder
     "qoder_bin":            "",
     "qoder_model":          "",

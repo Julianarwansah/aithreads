@@ -13,14 +13,17 @@ load_dotenv()
 
 import config_loader
 
-_DIR          = os.path.dirname(os.path.abspath(__file__))
-BOT_SCRIPT    = os.path.join(_DIR, "auto_commenter.py")
-POSTER_SCRIPT = os.path.join(_DIR, "threads_poster.py")
-BOT_LOG       = os.path.join(_DIR, "bot_output.log")
-POSTER_LOG    = os.path.join(_DIR, "poster_output.log")
-BOT_PID       = os.path.join(_DIR, "bot.pid")
-POSTER_PID    = os.path.join(_DIR, "poster.pid")
-PORT          = int(os.getenv("UI_PORT", "5000"))
+_DIR           = os.path.dirname(os.path.abspath(__file__))
+BOT_SCRIPT     = os.path.join(_DIR, "auto_commenter.py")
+POSTER_SCRIPT  = os.path.join(_DIR, "threads_poster.py")
+WATCHER_SCRIPT = os.path.join(_DIR, "reply_watcher.py")
+BOT_LOG        = os.path.join(_DIR, "bot_output.log")
+POSTER_LOG     = os.path.join(_DIR, "poster_output.log")
+WATCHER_LOG    = os.path.join(_DIR, "watcher_output.log")
+BOT_PID        = os.path.join(_DIR, "bot.pid")
+POSTER_PID     = os.path.join(_DIR, "poster.pid")
+WATCHER_PID    = os.path.join(_DIR, "watcher.pid")
+PORT           = int(os.getenv("UI_PORT", "5000"))
 
 # ── process helpers ──────────────────────────────────────────────────────────
 def _read_pid(pidfile):
@@ -80,6 +83,10 @@ def _watchdog_loop():
         if cfg.get("poster_enabled") and Path(POSTER_PID).exists() and not _is_alive(POSTER_PID):
             Path(POSTER_PID).unlink(missing_ok=True)
             _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID)
+        # Restart watcher if enabled and crashed
+        if cfg.get("auto_reply_enabled") and Path(WATCHER_PID).exists() and not _is_alive(WATCHER_PID):
+            Path(WATCHER_PID).unlink(missing_ok=True)
+            _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID)
 
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
@@ -346,8 +353,10 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 <div class="page-body">
 
   <div class="btn-row">
-    <button class="btn btn-green" id="btn-start" onclick="startBot()">▶ Jalankan Commenter</button>
-    <button class="btn btn-red"   id="btn-stop"  onclick="stopBot()" disabled>■ Hentikan</button>
+    <button class="btn btn-green" id="btn-start"   onclick="startBot()">▶ Commenter</button>
+    <button class="btn btn-red"   id="btn-stop"    onclick="stopBot()" disabled>■ Stop Commenter</button>
+    <button class="btn btn-green" id="wbtn-start"  onclick="startWatcher()" style="background:var(--teal)">▶ Reply Watcher</button>
+    <button class="btn btn-red"   id="wbtn-stop"   onclick="stopWatcher()" disabled>■ Stop Watcher</button>
     <button class="btn btn-ghost" onclick="pollStatus();loadComments()">↻ Refresh</button>
   </div>
 
@@ -371,7 +380,9 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     <div class="card">
       <div class="card-hdr">Status Runtime</div>
       <div class="row"><span class="k">Commenter</span><span class="v" id="d-bot" style="color:var(--red)">Stopped</span></div>
+      <div class="row"><span class="k">Reply Watcher</span><span class="v" id="d-watcher" style="color:var(--muted)">Stopped</span></div>
       <div class="row"><span class="k">Poster</span><span class="v" id="d-poster" style="color:var(--muted)">Stopped</span></div>
+      <div class="row"><span class="k">Like Sebelum Komentar</span><span class="v" id="d-like">—</span></div>
       <div class="row"><span class="k">Jam Aktif</span><span class="v" id="d-sched">—</span></div>
       <div class="row"><span class="k">Watchdog</span><span class="v" id="d-wd">—</span></div>
       <div class="row"><span class="k">Komentar Terakhir</span><span class="v" id="d-lcmt">—</span></div>
@@ -598,6 +609,26 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="sec-title">Sistem</div>
       <div class="sec-desc">Pengaturan watchdog dan data.</div>
       <div class="fg">
+        <label>Like Sebelum Komentar</label>
+        <select class="fi" id="s-like">
+          <option value="true">Aktif — like post dulu sebelum komentar (lebih natural)</option>
+          <option value="false">Nonaktif</option>
+        </select>
+        <div class="hint">Jeda 2–6 detik antara like dan komentar agar tidak terlihat seperti bot.</div>
+      </div>
+      <div class="fg">
+        <label>Auto-Reply ke Balasan</label>
+        <select class="fi" id="s-ar">
+          <option value="false">Nonaktif</option>
+          <option value="true">Aktif — balas orang yang reply ke komentar kita</option>
+        </select>
+        <div class="hint">Butuh THREADS_USERNAME di .env. Jalankan Reply Watcher dari tombol Overview.</div>
+      </div>
+      <div class="fg">
+        <label>Interval Cek Balasan <span class="rv" id="rv-arc">30</span> menit</label>
+        <input type="range" class="fi" id="s-arc" min="10" max="120" value="30" oninput="rv('rv-arc',this.value)">
+      </div>
+      <div class="fg" style="margin-top:14px">
         <label>Watchdog Auto-Restart</label>
         <select class="fi" id="s-wd">
           <option value="true">Aktif — restart otomatis jika bot crash</option>
@@ -681,6 +712,17 @@ async function stopPoster(){
   await fetch('/api/poster/stop',{method:'POST'});
   toast('Poster dihentikan');pollStatus();
 }
+async function startWatcher(){
+  document.getElementById('wbtn-start').disabled=true;
+  const d=await(await fetch('/api/watcher/start',{method:'POST'})).json();
+  toast(d.ok?'Reply Watcher dimulai!':'Gagal: '+d.msg,d.ok?'ok':'err');
+  pollStatus();
+}
+async function stopWatcher(){
+  document.getElementById('wbtn-stop').disabled=true;
+  await fetch('/api/watcher/stop',{method:'POST'});
+  toast('Reply Watcher dihentikan');pollStatus();
+}
 
 // ── status ────────────────────────────────────────────────────────────────
 async function pollStatus(){
@@ -724,8 +766,13 @@ async function pollStatus(){
     wdBadge.textContent='watchdog '+(wdOn?'✓':'off');
 
     // detail
+    const rw=d.watcher_running;
+    const wbS=document.getElementById('wbtn-start'),wbT=document.getElementById('wbtn-stop');
+    if(wbS)wbS.disabled=rw; if(wbT)wbT.disabled=!rw;
     const bEl=document.getElementById('d-bot');bEl.textContent=rb?'Running':'Stopped';bEl.style.color=rb?'var(--green)':'var(--red)';
     const pEl=document.getElementById('d-poster');pEl.textContent=rp?'Running':'Stopped';pEl.style.color=rp?'var(--purple)':'var(--muted)';
+    const wEl=document.getElementById('d-watcher');if(wEl){wEl.textContent=rw?'Running':'Stopped';wEl.style.color=rw?'var(--teal)':'var(--muted)';}
+    const lEl=document.getElementById('d-like');if(lEl)lEl.textContent=fi.like_before_comment?'Aktif ✓':'Nonaktif';
     document.getElementById('d-sched').textContent=`${String(sh).padStart(2,'0')}:00–${String(eh).padStart(2,'0')}:00 ${inHours?'✓ Aktif':'(di luar jam)'}`;
     document.getElementById('d-wd').textContent=wdOn?'Aktif — auto-restart ON':'Nonaktif';
     document.getElementById('d-lcmt').textContent=s.last_comment_time||'—';
@@ -878,6 +925,9 @@ async function loadSettings(){
     document.getElementById('s-qmdl').value=s.qoder_model||'';
     setSlider('s-pint','rv-pint',s.poster_interval_hours,48);
     document.getElementById('s-ptopics').value=(s.poster_topics||[]).join('\n');
+    document.getElementById('s-like').value=s.like_before_comment===false?'false':'true';
+    document.getElementById('s-ar').value=s.auto_reply_enabled?'true':'false';
+    setSlider('s-arc','rv-arc',s.auto_reply_check_minutes,30);
     document.getElementById('s-wd').value=s.watchdog_enabled===false?'false':'true';
     extraIt=[...(s.it_ai_keywords_extra||[])];
     extraLk=[...(s.loker_keywords_extra||[])];
@@ -924,7 +974,10 @@ async function saveAll(){
     qoder_model:           document.getElementById('s-qmdl').value.trim(),
     poster_interval_hours: +document.getElementById('s-pint').value,
     poster_topics:         topics.length?topics:undefined,
-    watchdog_enabled:      document.getElementById('s-wd').value==='true',
+    like_before_comment:       document.getElementById('s-like').value==='true',
+    auto_reply_enabled:        document.getElementById('s-ar').value==='true',
+    auto_reply_check_minutes:  +document.getElementById('s-arc').value,
+    watchdog_enabled:          document.getElementById('s-wd').value==='true',
     it_ai_keywords_extra:  extraIt,
     loker_keywords_extra:  extraLk,
   };
@@ -985,20 +1038,24 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 it_kw = lk_kw = 0
             self._json(200, {
-                "running":        _is_alive(BOT_PID),
-                "poster_running": _is_alive(POSTER_PID),
-                "pid":            _read_pid(BOT_PID),
-                "poster_pid":     _read_pid(POSTER_PID),
-                "stats":          stats,
+                "running":         _is_alive(BOT_PID),
+                "poster_running":  _is_alive(POSTER_PID),
+                "watcher_running": _is_alive(WATCHER_PID),
+                "pid":             _read_pid(BOT_PID),
+                "poster_pid":      _read_pid(POSTER_PID),
+                "watcher_pid":     _read_pid(WATCHER_PID),
+                "stats":           stats,
                 "filter_info": {
-                    "it_kw":            it_kw,
-                    "lk_kw":            lk_kw,
-                    "max_age":          cfg["max_post_age_hours"],
-                    "active_start":     cfg["active_start_hour"],
-                    "active_end":       cfg["active_end_hour"],
-                    "watchdog":         cfg["watchdog_enabled"],
-                    "poster_interval":  cfg["poster_interval_hours"],
-                    "poster_topics":    cfg.get("poster_topics",[]),
+                    "it_kw":               it_kw,
+                    "lk_kw":               lk_kw,
+                    "max_age":             cfg["max_post_age_hours"],
+                    "active_start":        cfg["active_start_hour"],
+                    "active_end":          cfg["active_end_hour"],
+                    "watchdog":            cfg["watchdog_enabled"],
+                    "like_before_comment": cfg.get("like_before_comment", True),
+                    "auto_reply_enabled":  cfg.get("auto_reply_enabled", False),
+                    "poster_interval":     cfg["poster_interval_hours"],
+                    "poster_topics":       cfg.get("poster_topics",[]),
                 },
             })
 
@@ -1043,10 +1100,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if   path == "/api/bot/start":    self._json(200, _launch(BOT_SCRIPT, BOT_LOG, BOT_PID))
-        elif path == "/api/bot/stop":     self._json(200, _terminate(BOT_PID))
-        elif path == "/api/poster/start": self._json(200, _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID))
-        elif path == "/api/poster/stop":  self._json(200, _terminate(POSTER_PID))
+        if   path == "/api/bot/start":     self._json(200, _launch(BOT_SCRIPT, BOT_LOG, BOT_PID))
+        elif path == "/api/bot/stop":      self._json(200, _terminate(BOT_PID))
+        elif path == "/api/poster/start":  self._json(200, _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID))
+        elif path == "/api/poster/stop":   self._json(200, _terminate(POSTER_PID))
+        elif path == "/api/watcher/start": self._json(200, _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID))
+        elif path == "/api/watcher/stop":  self._json(200, _terminate(WATCHER_PID))
 
         elif path == "/api/settings":
             data = self._body()

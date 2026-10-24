@@ -31,8 +31,10 @@ ANTI_AI_PROMPT = ""
 
 _comment_history = []
 
-THREADS_HOME  = "https://www.threads.com/"
-GRAPHQL_URL   = "https://www.threads.com/graphql/query"
+THREADS_HOME       = "https://www.threads.com/"
+GRAPHQL_URL        = "https://www.threads.com/graphql/query"
+LIKE_DOC_ID        = "24753372994365040"
+LIKE_FRIENDLY_NAME = "useTHLikeMutationLikeMutation"
 GRAPHQL_DUMP  = "graphql_dump.json"
 REPLY_ENDPOINT = "https://www.threads.com/api/v1/media/configure_text_only_post/"
 AUTO_MODE = True
@@ -212,6 +214,37 @@ komentar terakhir lo (jangan ulangi pola/nada yang sama):
         stats_tracker.increment("llm_errors")
         logger.error("Gagal membuat balasan: %s", exc)
         return "SKIP"
+
+def like_post(session, tokens: Dict[str, str], post_id: str) -> bool:
+    """Like sebuah post sebelum komentar agar lebih natural."""
+    headers = dict(BASE_HEADERS)
+    headers["x-fb-friendly-name"] = LIKE_FRIENDLY_NAME
+    csrf = session.cookies.get("csrftoken")
+    if csrf:
+        headers["x-csrftoken"] = csrf
+
+    variables = {
+        "mediaID":     post_id,
+        "requestData": {"container_module": "ig_text_feed_timeline"},
+    }
+    payload = urlencode({
+        "lsd":                      tokens.get("lsd", ""),
+        "fb_dtsg":                  tokens.get("fb_dtsg", ""),
+        "doc_id":                   LIKE_DOC_ID,
+        "variables":                json.dumps(variables),
+        "server_timestamps":        "true",
+        "fb_api_req_friendly_name": LIKE_FRIENDLY_NAME,
+    })
+    try:
+        resp = session.post(GRAPHQL_URL, data=payload, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            return "errors" not in data and data.get("data") is not None
+        return False
+    except Exception as e:
+        print(f"[LIKE] Error: {e}")
+        return False
+
 
 def post_reply(session, post_id: str, text: str) -> bool:
     csrf = (
@@ -534,49 +567,42 @@ def process_timeline(session):
 
     for p in posts[:1]:
         username = p.get("username", "?")
-        post_id = p.get("post_id", "?")
-        caption = p.get("caption", "")
-        
+        post_id  = p.get("post_id",  "?")
+        caption  = p.get("caption",  "")
+
         print(f"\n[INFO] Menemukan target: @{username}")
 
         reply_text = generate_reply(caption)
-        
+
         if reply_text == "SKIP":
-            print("  >> AI memutuskan untuk SKIP thread ini (Tidak relevan/Banned Phrase/Terdeteksi link).")
-            time.sleep(15) # Jeda pendek agar tidak spam request API Threads
+            print("  >> AI memutuskan SKIP (tidak relevan / terdeteksi link / banned phrase).")
+            time.sleep(15)
             continue
-            
+
         print("--------------------------------------------------")
         print(f"  DRAF AI: {reply_text}")
         print("--------------------------------------------------")
-        if AUTO_MODE:
-            # === HOOK LIKE POST ===
-            try:
-                pass
-            except Exception as e:
-                # Error handling tingkat akhir agar tidak menghentikan proses komentar
-                print(f"[LIKE] Exception tidak tertangani: {e}")
-            # ======================
-            
-            # --- DEBUG LOGGING ---
-            print("\n=== DEBUG: RAW POST STRUCTURE SEBELUM REPLY ===")
-            import json
-            # Safety fallback so json.dumps doesn't fail on complex objects
-            try:
-                print(json.dumps(p.get("raw_post", {}), indent=2))
-            except Exception as err:
-                print(f"Failed to dump JSON: {err}")
-                print(p.get("raw_post", {}))
-            print("===============================================\n")
-            # ---------------------
 
+        if AUTO_MODE:
+            # 1. Like dulu sebelum komentar (lebih natural)
+            if config_loader.get("like_before_comment"):
+                jeda_like = random.randint(2, 6)
+                print(f"  [LIKE] Like dulu… (jeda {jeda_like}d)")
+                time.sleep(jeda_like)
+                liked = like_post(session, tokens, str(post_id))
+                print(f"  [LIKE] {'Berhasil 👍' if liked else 'Gagal, lanjut komentar'}")
+                time.sleep(random.randint(1, 3))
+
+            # 2. Kirim komentar
             success = post_reply(session, str(post_id), reply_text)
             if success:
                 print("  >> Status Pengiriman: Berhasil!")
                 stats_tracker.increment("comments_sent")
+                reply_cache.save_to_cache(caption, reply_text, post_id=str(post_id))
             else:
                 print("  >> Status Pengiriman: Gagal.")
                 stats_tracker.increment("comment_failures")
+
         human_delay()
     return True
 

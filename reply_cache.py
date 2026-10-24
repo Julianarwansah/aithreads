@@ -45,8 +45,26 @@ def check_cache(prompt: str):
         return entry.get("reply") if entry else None
 
 
-def save_to_cache(prompt: str, reply: str):
+def save_to_cache(prompt: str, reply: str, post_id: str = ""):
     with _lock:
         cache = _load()
-        cache[prompt] = {"reply": reply, "timestamp": time.time()}
+        cache[prompt] = {"reply": reply, "timestamp": time.time(), "post_id": post_id}
         _save(cache)
+
+
+def get_recent_post_ids(max_age_hours: float = 24) -> list[dict]:
+    """Kembalikan list {post_id, caption, reply} yang dikomentari dalam N jam terakhir."""
+    with _lock:
+        cache = _load()
+        now   = time.time()
+        cutoff = now - max_age_hours * 3600
+        result = []
+        for caption, v in cache.items():
+            if v.get("timestamp", 0) >= cutoff and v.get("post_id"):
+                result.append({
+                    "post_id":   v["post_id"],
+                    "caption":   caption,
+                    "our_reply": v.get("reply", ""),
+                    "ts":        v["timestamp"],
+                })
+        return sorted(result, key=lambda x: x["ts"], reverse=True)
