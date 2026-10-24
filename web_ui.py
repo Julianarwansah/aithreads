@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config_loader
+import growth_tracker
 
 _DIR           = os.path.dirname(os.path.abspath(__file__))
 BOT_SCRIPT     = os.path.join(_DIR, "auto_commenter.py")
@@ -89,6 +90,38 @@ def _watchdog_loop():
             _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID)
 
 threading.Thread(target=_watchdog_loop, daemon=True).start()
+
+# ── growth snapshot thread ────────────────────────────────────────────────────
+_growth_session = None
+
+def _growth_loop():
+    """Ambil snapshot follower sekali per jam (hanya simpan 1 entry per hari)."""
+    global _growth_session
+    time.sleep(10)   # tunggu server siap
+    while True:
+        try:
+            user_id  = os.getenv("THREADS_DS_USER_ID", "").strip()
+            if user_id and _growth_session:
+                growth_tracker.record_snapshot(_growth_session, user_id)
+        except Exception as e:
+            print(f"[GROWTH] Loop error: {e}")
+        time.sleep(3600)   # cek setiap jam
+
+def _init_growth_session():
+    """Inisialisasi session untuk growth tracker (lazy, saat pertama dibutuhkan)."""
+    global _growth_session
+    if _growth_session:
+        return
+    try:
+        from dotenv import load_dotenv; load_dotenv()
+        from services.session_manager import SessionManager, SessionStatus
+        sm = SessionManager()
+        if sm.load_session() and sm.validate_session().status == SessionStatus.VALID:
+            _growth_session = sm.inject_session()
+    except Exception:
+        pass
+
+threading.Thread(target=lambda: (_init_growth_session(), _growth_loop()), daemon=True).start()
 
 # ── data helpers ─────────────────────────────────────────────────────────────
 def _get_stats():
@@ -337,6 +370,12 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   </button>
   <button class="nav-item" onclick="goPage('poster')" id="nav-poster">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>Poster
+  </button>
+  <button class="nav-item" onclick="goPage('growth')" id="nav-growth">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Growth
+  </button>
+  <button class="nav-item" onclick="goPage('bl')" id="nav-bl">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Blacklist
   </button>
   <div class="nav-sep"></div>
   <button class="nav-item" onclick="goPage('set')" id="nav-set">
@@ -651,6 +690,64 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 </div>
 </div>
 
+<!-- ════════════════════════════ GROWTH ══════════════════════════════════════ -->
+<div class="page" id="page-growth">
+<div class="page-body">
+
+  <div class="grid4">
+    <div class="stat-card"><div class="lbl">Followers</div><div class="num p" id="g-fol">—</div><div class="sub" id="g-fol-sub">memuat…</div></div>
+    <div class="stat-card"><div class="lbl">Following</div><div class="num b" id="g-fwg">—</div><div class="sub" id="g-fwg-sub"></div></div>
+    <div class="stat-card"><div class="lbl">+Followers 7 Hari</div><div class="num g" id="g-delta">—</div><div class="sub" id="g-delta-sub"></div></div>
+    <div class="stat-card"><div class="lbl">Total Post</div><div class="num" id="g-posts" style="color:var(--yellow)">—</div><div class="sub">di akun Threads</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Pertumbuhan Follower 30 Hari <a onclick="loadGrowth()">↻ Refresh</a></div>
+    <div class="chart-wrap">
+      <div class="bars" id="g-bars" style="height:80px"><!-- diisi JS --></div>
+      <div class="bar-xlbl"><span id="g-xlbl-l">—</span><span id="g-xlbl-r">Hari ini</span></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">Snapshot diambil otomatis sekali per hari. Data mulai terkumpul setelah dashboard berjalan 24 jam.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Riwayat Harian</div>
+    <div id="g-table" style="font-size:12px;max-height:300px;overflow-y:auto">
+      <div style="color:var(--muted)">Memuat…</div>
+    </div>
+  </div>
+
+</div></div>
+
+<!-- ════════════════════════════ BLACKLIST ════════════════════════════════════ -->
+<div class="page" id="page-bl">
+<div class="page-body">
+
+  <div class="card">
+    <div class="card-hdr">Tambah ke Blacklist</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input type="text" id="bl-inp" class="fi" style="flex:1;background:var(--surf2)" placeholder="username tanpa @ (contoh: somebot123)" onkeydown="if(event.key==='Enter')addBlacklist()">
+      <button class="btn btn-red sm" onclick="addBlacklist()">Blacklist</button>
+    </div>
+    <div class="hint">Akun yang di-blacklist akan dilewati oleh commenter secara permanen.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Akun yang Di-blacklist <span id="bl-count" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px"></span> <a onclick="loadBlacklist()">↻</a></div>
+    <div id="bl-list"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Auto-Blacklist dari Komentar</div>
+    <div class="row"><span class="k">Akun yang sudah dikomentari</span><span class="v" id="bl-commented">—</span></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
+      Klik username di bawah untuk langsung blacklist akun yang sudah pernah dikomentari.
+    </div>
+    <div id="bl-auto-list" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px"></div>
+  </div>
+
+</div></div>
+
 </div><!-- /pages -->
 </div><!-- /layout -->
 <div id="toast"></div>
@@ -673,15 +770,6 @@ function updateClock(){
 setInterval(updateClock,1000);updateClock();
 
 // ── page nav ──────────────────────────────────────────────────────────────
-function goPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
-  document.getElementById('nav-'+id).classList.add('active');
-  if(id==='cmt')loadComments();
-  if(id==='set')loadSettings();
-  if(id==='poster')loadPosterPosts();
-}
 function goSet(id){
   document.querySelectorAll('.ss').forEach(s=>s.classList.remove('on'));
   document.querySelectorAll('.snav').forEach(s=>s.classList.remove('on'));
@@ -991,11 +1079,108 @@ async function saveAll(){
   }catch(e){toast('Error: '+e,'err');}
 }
 
+// ── growth ────────────────────────────────────────────────────────────────
+async function loadGrowth(){
+  try{
+    const d=await(await fetch('/api/growth')).json();
+    const lat=d.latest||{};
+    const dlt=d.delta||{};
+    const hist=d.history||[];
+
+    document.getElementById('g-fol').textContent=lat.followers??'—';
+    document.getElementById('g-fwg').textContent=lat.following??'—';
+    const df=dlt.followers??0;
+    document.getElementById('g-delta').textContent=(df>0?'+':'')+df;
+    document.getElementById('g-delta').style.color=df>0?'var(--green)':df<0?'var(--red)':'var(--muted)';
+    document.getElementById('g-delta-sub').textContent=`dalam ${dlt.days||7} hari`;
+    document.getElementById('g-posts').textContent=lat.posts??'—';
+    document.getElementById('g-fol-sub').textContent=lat.date?'Update: '+lat.date:'Belum ada data';
+
+    // chart
+    const bars=document.getElementById('g-bars');
+    if(!hist.length){bars.innerHTML='<div style="color:var(--muted);font-size:11px">Belum ada data. Snapshot akan otomatis diambil setiap jam.</div>';return;}
+    const vals=hist.map(h=>h.followers||0);
+    const max=Math.max(...vals)||1;
+    const min=Math.min(...vals);
+    const range=max-min||1;
+    bars.innerHTML=hist.map(h=>{
+      const pct=Math.max(4,Math.round((h.followers-min)/range*70));
+      return `<div class="bar" style="height:${pct}px;background:var(--purple)"><div class="bar-tip">${h.date}: ${h.followers} followers</div></div>`;
+    }).join('');
+    document.getElementById('g-xlbl-l').textContent=hist[0]?.date||'—';
+    document.getElementById('g-xlbl-r').textContent=hist[hist.length-1]?.date||'—';
+
+    // table
+    const tbl=document.getElementById('g-table');
+    if(!hist.length){tbl.innerHTML='<div style="color:var(--muted)">Belum ada data.</div>';return;}
+    tbl.innerHTML='<table style="width:100%;border-collapse:collapse">'
+      +'<tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px"><td style="padding:4px 8px">Tanggal</td><td style="padding:4px 8px;text-align:right">Followers</td><td style="padding:4px 8px;text-align:right">Following</td><td style="padding:4px 8px;text-align:right">±</td></tr>'
+      +[...hist].reverse().map((h,i,a)=>{
+        const prev=a[i+1];
+        const d=prev?(h.followers-prev.followers):0;
+        const dc=d>0?'var(--green)':d<0?'var(--red)':'var(--muted)';
+        return `<tr style="border-top:1px solid var(--brd2)"><td style="padding:5px 8px;font-size:12px">${h.date}</td><td style="padding:5px 8px;text-align:right;font-weight:600">${h.followers}</td><td style="padding:5px 8px;text-align:right;color:var(--muted)">${h.following}</td><td style="padding:5px 8px;text-align:right;color:${dc};font-weight:600">${d>0?'+':''}${d||'—'}</td></tr>`;
+      }).join('')+'</table>';
+  }catch(e){}
+}
+
+// ── blacklist ─────────────────────────────────────────────────────────────
+async function loadBlacklist(){
+  try{
+    const bl=await(await fetch('/api/blacklist')).json();
+    document.getElementById('bl-count').textContent=bl.length+' akun';
+    const el=document.getElementById('bl-list');
+    if(!bl.length){el.innerHTML='<div style="color:var(--muted);font-size:12px">Kosong — belum ada akun yang di-blacklist.</div>';return;}
+    el.innerHTML=bl.map(u=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--brd2)">
+        <span style="font-size:13px">@${u}</span>
+        <button class="btn btn-ghost xs" onclick="removeBlacklist('${u}')">Hapus</button>
+      </div>`).join('');
+  }catch(e){}
+}
+async function addBlacklist(){
+  const inp=document.getElementById('bl-inp');
+  const u=inp.value.trim().replace(/^@/,'');
+  if(!u)return;
+  await fetch('/api/blacklist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});
+  inp.value='';loadBlacklist();toast('@'+u+' di-blacklist');
+}
+async function removeBlacklist(u){
+  await fetch('/api/blacklist/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});
+  loadBlacklist();toast('@'+u+' dihapus dari blacklist');
+}
+async function loadAutoBlacklist(){
+  try{
+    const cmts=await(await fetch('/api/comments')).json();
+    const freq={};
+    // hitung frekuensi dari history komentar (tidak ada username di cache, gunakan post_id sebagai proxy)
+    document.getElementById('bl-commented').textContent=cmts.length+' komentar tersimpan';
+    // Tampilkan tombol blacklist dari komentar terbaru
+    const el=document.getElementById('bl-auto-list');
+    el.innerHTML='<div style="font-size:11px;color:var(--muted2)">Fitur ini akan tersedia setelah bot aktif dan menyimpan riwayat username.</div>';
+  }catch(e){}
+}
+
+// ── override goPage to load data ─────────────────────────────────────────
+const _origGoPage=goPage;
+function goPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.getElementById('nav-'+id).classList.add('active');
+  if(id==='cmt')loadComments();
+  if(id==='set')loadSettings();
+  if(id==='poster')loadPosterPosts();
+  if(id==='growth'){loadGrowth();}
+  if(id==='bl'){loadBlacklist();loadAutoBlacklist();}
+}
+
 // ── init ──────────────────────────────────────────────────────────────────
 connectSSE();
 pollStatus();loadComments();loadChart();
 setInterval(pollStatus,5000);
 setInterval(()=>{loadComments();loadChart();},20000);
+setInterval(loadGrowth,300000); // refresh growth setiap 5 menit
 </script>
 </body>
 </html>"""
@@ -1071,6 +1256,17 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/poster/posts":
             self._json(200, _get_poster_posts())
 
+        elif path == "/api/growth":
+            self._json(200, {
+                "history": growth_tracker.get_history(30),
+                "latest":  growth_tracker.get_latest(),
+                "delta":   growth_tracker.get_delta(7),
+            })
+
+        elif path == "/api/blacklist":
+            cfg = config_loader.load()
+            self._json(200, cfg.get("blacklisted_accounts", []))
+
         elif path == "/api/logs":
             self.send_response(200)
             self.send_header("Content-Type","text/event-stream; charset=utf-8")
@@ -1113,6 +1309,27 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("qoder_model"): os.environ["QODER_MODEL"] = data["qoder_model"]
             if data.get("app_mode"):    os.environ["APP_MODE"]    = data["app_mode"]
             self._json(200, {"ok": config_loader.save(data)})
+
+        elif path == "/api/blacklist/add":
+            data = self._body()
+            username = (data.get("username") or "").strip().lstrip("@").lower()
+            if username:
+                cfg = config_loader.load()
+                bl  = cfg.get("blacklisted_accounts", [])
+                if username not in bl:
+                    bl.append(username)
+                    config_loader.save({"blacklisted_accounts": bl})
+                self._json(200, {"ok": True, "blacklist": bl})
+            else:
+                self._json(200, {"ok": False, "msg": "username kosong"})
+
+        elif path == "/api/blacklist/remove":
+            data = self._body()
+            username = (data.get("username") or "").strip().lstrip("@").lower()
+            cfg = config_loader.load()
+            bl  = [u for u in cfg.get("blacklisted_accounts", []) if u != username]
+            config_loader.save({"blacklisted_accounts": bl})
+            self._json(200, {"ok": True, "blacklist": bl})
 
         elif path == "/api/comments/clear":
             cp = os.getenv("REPLY_CACHE_FILE", os.path.join(_DIR,"reply_cache.json"))

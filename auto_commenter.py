@@ -515,12 +515,17 @@ def process_timeline(session):
         print("[DEBUG] process_timeline: Tidak ada postingan yang berhasil diekstrak!")
         return False
 
-    # Filter: hanya IT/AI, skip lowongan kerja, max N jam lalu
+    # Filter: hanya IT/AI, skip lowongan kerja, max N jam lalu, skip blacklist
     cfg = config_loader.load()
     MAX_AGE_SECONDS = float(cfg["max_post_age_hours"]) * 3600
+    blacklist = [u.lower().strip() for u in cfg.get("blacklisted_accounts", [])]
     now = time.time()
     filtered = []
     for p in posts:
+        uname = (p.get("username") or "").lower()
+        if uname in blacklist:
+            print(f"[FILTER] @{p['username']} dilewati — akun di-blacklist")
+            continue
         taken_at = p.get("taken_at") or 0
         age_seconds = now - taken_at if taken_at else MAX_AGE_SECONDS + 1
         age_hours = age_seconds / 3600

@@ -9,7 +9,7 @@ import threading
 
 _DIR          = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(_DIR, "ui_settings.json")
-_lock         = threading.Lock()
+_lock         = threading.RLock()   # RLock: boleh di-acquire ulang oleh thread yang sama
 
 DEFAULTS = {
     # mode & filter
@@ -41,6 +41,9 @@ DEFAULTS = {
         "tech opinion",
         "startup dan produk digital",
     ],
+
+    # blacklist akun (username tanpa @)
+    "blacklisted_accounts": [],
 
     # like sebelum komentar
     "like_before_comment":  True,
