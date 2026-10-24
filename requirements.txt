@@ -1,0 +1,13 @@
+# ThreadScope — Python dependencies
+Flask==3.1.3
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.51
+Werkzeug==3.1.8
+Jinja2==3.1.6
+click==8.4.1
+python-dotenv==1.2.2
+curl_cffi==0.15.0
+requests==2.34.2
+
+# Backend LLM tidak butuh package tambahan: memakai Qoder CLI yang sudah
+# terinstall & login di mesin ini (dipanggil lewat subprocess di llm_router.py)

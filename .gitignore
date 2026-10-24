@@ -1,0 +1,26 @@
+# === Kredensial & rahasia: JANGAN pernah commit file .env ===
+.env
+
+# === File yang dihasilkan saat runtime ===
+reply_cache.json
+gemini_cache.json
+stats.json
+feed_candidates.json
+graphql_candidates.json
+NETWORK_DISCOVERY_REPORT.md
+bot.pid
+poster.pid
+bot_output.log
+poster_output.log
+ui_settings.json
+graphql_dump.json
+network_capture.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# === OS / editor ===
+.DS_Store
