@@ -10,6 +10,7 @@ graphql_candidates.json
 NETWORK_DISCOVERY_REPORT.md
 bot.pid
 poster.pid
+watcher.pid
 bot_output.log
 poster_output.log
 ui_settings.json
