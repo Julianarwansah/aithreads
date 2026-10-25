@@ -197,6 +197,62 @@ def _jaccard(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb) if (wa and wb) else 0.0
 
 
+def _summarize_thread(replies: list, caption: str) -> str:
+    """Ringkas vibe thread dari banyak komentar jadi 1 kalimat singkat (LLM).
+    Hanya dipanggil saat replies >= 5 untuk menghindari overhead pada thread pendek.
+    """
+    sample = "\n".join(f'- "{r[:60]}"' for r in replies[:8])
+    prompt = (
+        "Ringkas vibe/suasana diskusi thread Threads ini dalam 1 kalimat pendek bahasa Indonesia.\n\n"
+        f"Post asli: {caption[:80]}\n"
+        f"Komentar orang:\n{sample}\n\n"
+        "Vibe thread (1 kalimat, contoh: 'banyak yang relate dan cerita pengalaman gagal deploy'):"
+    )
+    try:
+        return llm_router.generate(prompt).strip()[:120]
+    except Exception:
+        return ""
+
+
+def refine_persona() -> str:
+    """Analisis pola komentar yang berhasil → generate persona baru yang lebih efektif.
+    Return "" jika data belum cukup (< 3 engaged comments).
+    """
+    engaged = comment_memory.get_engaged_comments(n=8)
+    if len(engaged) < 3:
+        return ""
+
+    current  = config_loader.get("bot_persona") or "(belum ada)"
+    examples = "\n".join(f'- "{e["reply"]}" [{e.get("style","?")}]' for e in engaged[:5])
+
+    stats      = comment_memory.get_engagement_stats()
+    best_style = stats.get("best_style", "")
+    best_sent  = stats.get("best_sentiment", "")
+    insights   = []
+    if best_style:
+        rate = stats.get("by_style", {}).get(best_style, {}).get("rate", 0)
+        insights.append(f"gaya '{best_style}' paling sering dibalas ({rate:.0%})")
+    if best_sent:
+        rate = stats.get("by_sentiment", {}).get(best_sent, {}).get("rate", 0)
+        insights.append(f"post bertipe '{best_sent}' paling produktif ({rate:.0%})")
+    insight_line = " · ".join(insights)
+
+    prompt = (
+        "Kamu AI yang membantu optimasi persona bot komentar Threads IT Indonesia.\n\n"
+        f"Persona saat ini:\n{current}\n\n"
+        f"Komentar yang berhasil dibalas orang:\n{examples}\n\n"
+        + (f"Data engagement: {insight_line}\n\n" if insight_line else "")
+        + "Tulis persona baru yang lebih efektif berdasarkan pola komentar yang berhasil.\n"
+        "Format: 2–3 kalimat, fokus GAYA menulis (bukan identitas), bahasa Indonesia.\n"
+        "Jawab langsung teks persona:"
+    )
+    try:
+        new_persona = llm_router.generate(prompt).strip()
+        return new_persona[:500] if new_persona else ""
+    except Exception:
+        return ""
+
+
 def _score_post_engagement(caption: str) -> int:
     """LLM nilai 1–5: seberapa besar potensi komentar kita dibalas.
     1 = pengumuman/generik, 5 = curhat/nanya/hot-take yang jelas butuh respon.
@@ -431,8 +487,19 @@ def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
 
     # ── konteks komentar orang lain ───────────────────────────────────────────
     if existing_replies:
-        others_block = "komentar orang lain yang SUDAH ADA di thread ini (jangan duplikat):\n"
-        others_block += "\n".join(f'- "{r[:80]}"' for r in existing_replies[:5])
+        if len(existing_replies) >= 5:
+            mood = _summarize_thread(existing_replies, caption)
+            if mood:
+                print(f"  [THREAD MOOD] {mood}")
+                others_block  = f"Vibe thread sekarang: {mood}\n"
+                others_block += "Contoh komentar:\n"
+                others_block += "\n".join(f'- "{r[:80]}"' for r in existing_replies[:3])
+            else:
+                others_block  = "komentar orang lain yang SUDAH ADA di thread ini (jangan duplikat):\n"
+                others_block += "\n".join(f'- "{r[:80]}"' for r in existing_replies[:5])
+        else:
+            others_block  = "komentar orang lain yang SUDAH ADA di thread ini (jangan duplikat):\n"
+            others_block += "\n".join(f'- "{r[:80]}"' for r in existing_replies[:5])
         hint = tone_block or "kalau orang-orang nanya, lo bisa jawab/relate. kalau udah banyak saran, jangan saran lagi."
         others_block += f"\n→ {hint}"
     else:
@@ -1102,6 +1169,17 @@ def process_timeline(session):
     # Kumpulkan post_id yang sudah pernah dikomentari (24 jam terakhir)
     commented_ids = {e["post_id"] for e in reply_cache.get_recent_post_ids(max_age_hours=24)}
 
+    # Peak-hour: comment 2× per siklus saat traffic tinggi
+    try:
+        peak_hours = reply_cache.get_peak_hours(top_n=5)
+        is_peak    = bool(peak_hours and datetime.now().hour in peak_hours)
+    except Exception:
+        is_peak = False
+    max_per_cycle  = 2 if is_peak else 1
+    comments_cycle = 0
+    if is_peak:
+        print(f"[PEAK] Jam {datetime.now().hour:02d}:xx peak hour — target {max_per_cycle} komentar siklus ini")
+
     for p in posts:
         username = p.get("username", "?")
         post_id  = p.get("post_id",  "?")
@@ -1150,8 +1228,24 @@ def process_timeline(session):
                     post_id=str(post_id),
                     comment_id=our_comment_id,
                 )
-                human_delay()
-                break  # satu komentar per siklus — berhasil
+
+                # Auto-refine persona setiap 15 komentar berhasil
+                total_sent = stats_tracker.get_stats().get("comments_sent", 0)
+                if total_sent > 0 and total_sent % 15 == 0:
+                    print(f"  [PERSONA] {total_sent} komentar terkirim — auto-refinement…")
+                    new_p = refine_persona()
+                    if new_p:
+                        config_loader.save({"bot_persona": new_p})
+                        print(f"  [PERSONA] Persona diperbarui: {new_p[:80]}…")
+                    else:
+                        print(f"  [PERSONA] Data belum cukup untuk refinement, skip.")
+
+                comments_cycle += 1
+                if comments_cycle >= max_per_cycle:
+                    human_delay()
+                    break
+                print(f"  [PEAK] {comments_cycle}/{max_per_cycle} — jeda singkat lalu lanjut…")
+                time.sleep(random.randint(90, 180))
             else:
                 print("  >> Status Pengiriman: Gagal, coba post berikutnya…")
                 stats_tracker.increment("comment_failures")
