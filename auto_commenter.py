@@ -190,6 +190,13 @@ def _quality_check(text: str) -> bool:
     return True
 
 
+def _jaccard(a: str, b: str) -> float:
+    """Similarity kata antara dua teks (0.0–1.0). Dipakai untuk dedup semantik."""
+    wa = set(a.lower().split())
+    wb = set(b.lower().split())
+    return len(wa & wb) / len(wa | wb) if (wa and wb) else 0.0
+
+
 def _score_post_engagement(caption: str) -> int:
     """LLM nilai 1–5: seberapa besar potensi komentar kita dibalas.
     1 = pengumuman/generik, 5 = curhat/nanya/hot-take yang jelas butuh respon.
@@ -536,6 +543,18 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
             retry = _do_generate()
             if retry and retry != "SKIP" and _quality_check(retry):
                 reply = retry
+
+        # ── semantic dedup — cek similarity dengan 5 komentar terakhir ────────
+        recent_replies = comment_memory.get_recent_replies(n=5)
+        if any(_jaccard(reply, r) >= 0.5 for r in recent_replies if r):
+            print(f"  [DEDUP] Komentar terlalu mirip histori — generate ulang…")
+            dedup_retry = _do_generate()
+            if dedup_retry and dedup_retry != "SKIP" and _quality_check(dedup_retry):
+                if not any(_jaccard(dedup_retry, r) >= 0.5 for r in recent_replies if r):
+                    reply = dedup_retry
+                    print(f"  [DEDUP] Pakai retry yang lebih unik")
+                else:
+                    print(f"  [DEDUP] Retry masih mirip — pakai versi awal")
 
         print(f"[FINAL]: {reply} ({len(reply)} kar)\n")
 
@@ -1021,6 +1040,20 @@ def process_timeline(session):
     if not posts:
         print("[FILTER] Tidak ada post IT/AI ≤5 jam di timeline, coba lagi di siklus berikutnya.")
         return False
+
+    # ── hard topic diversity — skip post dari topik yang sedang overused ──────
+    try:
+        overused = comment_memory.get_overused_topic(last_n=6)
+        if overused:
+            diverse = [p for p in posts if comment_memory._detect_topic_bucket(p.get("caption", "")) != overused]
+            if diverse:
+                skipped = len(posts) - len(diverse)
+                print(f"[DIVERSITY] Topik '{overused}' overused — skip {skipped} post, pakai {len(diverse)} alternatif")
+                posts = diverse
+            else:
+                print(f"[DIVERSITY] Topik '{overused}' overused tapi tidak ada topik lain — tetap pakai semua")
+    except Exception:
+        pass
 
     app_mode = os.getenv("APP_MODE", "normal").lower()
 

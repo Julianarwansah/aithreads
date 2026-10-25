@@ -18,6 +18,7 @@ load_dotenv()
 import config_loader
 import llm_router
 import stats_tracker
+from auto_commenter import _heuristic_score, _score_naturalness
 from services.session_manager import SessionManager, SessionStatus
 
 # Import shared timeline utilities dari auto_commenter
@@ -197,9 +198,38 @@ tema yang relevan sekarang: {topic_hint}"""
 
     user_prompt = "Tulis satu postingan Threads pendek yang relate ke tema yang lagi rame:"
 
+    def _gen_best_post() -> str:
+        two_prompt = (
+            "Tulis 2 versi postingan berbeda (1–3 kalimat masing-masing), "
+            f"pisahkan dengan ---\n\n{user_prompt}"
+        )
+        r = llm_router.generate(two_prompt, system_prompt=sys_prompt)
+        print(f"\n[POSTER RAW LLM]: {r}")
+        parts = [p.strip() for p in r.split("---") if p.strip()]
+        if len(parts) >= 2:
+            candidates = [_clean_post(p) for p in parts[:2]]
+            valid = [(t, _heuristic_score(t)) for t in candidates if t]
+            if valid:
+                best, sc = max(valid, key=lambda x: x[1])
+                print(f"  [POSTER DRAFT] {len(valid)} kandidat, pilih skor {sc:.1f}")
+                return best
+        return _clean_post(r)
+
     try:
-        content = llm_router.generate(user_prompt, system_prompt=sys_prompt)
-        content = _clean_post(content)
+        content = _gen_best_post()
+
+        # Self-critique gate
+        if content:
+            score = _score_naturalness(content, topic_hint)
+            print(f"  [POSTER CRITIQUE] Skor naturalness: {score}/10")
+            if score < 7:
+                print(f"  [POSTER CRITIQUE] Skor rendah — generate ulang…")
+                retry = _gen_best_post()
+                if retry:
+                    retry_score = _score_naturalness(retry, topic_hint)
+                    if retry_score > score:
+                        content = retry
+
         if content:
             _post_history.append(content)
             if len(_post_history) > 5:
