@@ -42,6 +42,7 @@ def _is_alive(pidfile):
 def _launch(script, logfile, pidfile, extra_env=None):
     if _is_alive(pidfile):
         return {"ok": False, "msg": "Sudah berjalan"}
+    os.makedirs(os.path.dirname(logfile), exist_ok=True)
     open(logfile, "w").close()
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     if extra_env:

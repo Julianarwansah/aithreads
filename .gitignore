@@ -1,5 +1,6 @@
 # === Kredensial & rahasia: JANGAN pernah commit file .env ===
 .env
+accounts/
 
 # === File yang dihasilkan saat runtime ===
 reply_cache.json
