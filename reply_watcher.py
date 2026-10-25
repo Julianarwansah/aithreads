@@ -32,7 +32,7 @@ import comment_memory
 import llm_router
 import stats_tracker
 import reply_cache as rc
-from auto_commenter import post_reply, get_fresh_tokens, detect_post_sentiment
+from auto_commenter import post_reply, get_fresh_tokens, detect_post_sentiment, _heuristic_score, _score_naturalness
 from services.session_manager import SessionManager, SessionStatus
 
 # Kata-kata yang menandakan reply negatif/laporan terhadap komentar kita
@@ -210,13 +210,39 @@ contoh yang bagus:
         f"Bales singkat:"
     )
 
+    def _clean(raw: str) -> str:
+        t = _re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', raw).strip().lstrip('"> ').strip()
+        return "" if _re.search(r'https?://\S+', t) else t
+
+    def _gen_best() -> str:
+        two_prompt = (
+            f"Tulis 2 versi balasan berbeda (1 kalimat masing-masing), "
+            f"pisahkan dengan ---\n\n{user_prompt}"
+        )
+        r = llm_router.generate(two_prompt, system_prompt=sys_prompt)
+        print(f"\n[WATCHER RAW LLM]: {r}")
+        parts = [_clean(p) for p in r.split("---") if p.strip()]
+        valid = [(t, _heuristic_score(t)) for t in parts if t]
+        if len(valid) >= 2:
+            best, sc = max(valid, key=lambda x: x[1])
+            print(f"  [WATCHER DRAFT] {len(valid)} kandidat, pilih skor {sc:.1f}: '{best[:50]}'")
+            return best
+        return _clean(r)
+
     try:
-        resp = llm_router.generate(user_prompt, system_prompt=sys_prompt)
-        resp = _re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', resp).strip()
-        resp = resp.lstrip('"> ').strip()
-        if _re.search(r'https?://\S+', resp):
+        resp = _gen_best()
+        if not resp:
             return ""
-        return resp[:200] if resp else ""
+
+        score = _score_naturalness(resp, their_reply)
+        print(f"  [WATCHER CRITIQUE] Skor naturalness: {score}/10")
+        if score < 7:
+            print(f"  [WATCHER CRITIQUE] Skor rendah — generate ulang…")
+            retry = _gen_best()
+            if retry and _score_naturalness(retry, their_reply) > score:
+                resp = retry
+
+        return resp[:200]
     except Exception as e:
         print(f"  [WATCHER] LLM error: {e}")
         return ""

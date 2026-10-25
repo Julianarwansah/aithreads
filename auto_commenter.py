@@ -161,6 +161,53 @@ def _quality_check(text: str) -> bool:
     return True
 
 
+def _classify_intention(caption: str, sentiment: str) -> str:
+    """
+    1 LLM call kecil untuk putuskan gaya komentar sebelum generate.
+    Pakai data engagement historis sebagai bias jika tersedia.
+    Return: "nanya" | "react" | "share" | "saran"
+    """
+    try:
+        stats      = comment_memory.get_engagement_stats()
+        best_style = stats.get("best_style", "")
+        by_style   = stats.get("by_style", {})
+        style_hint = ""
+        if best_style and by_style.get(best_style, {}).get("total", 0) >= 5:
+            rate = by_style[best_style].get("rate", 0)
+            if rate >= 0.35:
+                style_hint = f" (catatan: gaya '{best_style}' paling sering dibalas — {rate:.0%})"
+    except Exception:
+        best_style = ""
+        style_hint = ""
+
+    sentiment_map = {
+        "frustrated": "hindari saran, lebih ke react/relate",
+        "win":        "react atau relate, jangan nanya 'berhasil?'",
+        "question":   "nanya balik atau jawab singkat cocok",
+        "opinion":    "bisa setuju/nuansi atau nanya pendapat lebih",
+    }
+    sent_hint = sentiment_map.get(sentiment, "")
+    sent_line = f"\nPost mood: {sent_hint}" if sent_hint else ""
+
+    prompt = (
+        f"Pilih 1 gaya komentar Threads yang paling cocok untuk postingan ini:\n"
+        f"- nanya: tanya sesuatu ke poster\n"
+        f"- react: relate atau merespons singkat\n"
+        f"- share: cerita pengalaman singkat sendiri\n"
+        f"- saran: kasih saran (HANYA kalau poster jelas-jelas minta bantuan){sent_line}\n\n"
+        f"Post: {caption[:120]}\n"
+        f"Jawab HANYA satu kata{style_hint}:"
+    )
+    try:
+        resp = llm_router.generate(prompt).strip().lower()
+        for style in ("nanya", "react", "share", "saran"):
+            if style in resp:
+                return style
+    except Exception:
+        pass
+    return best_style or "react"
+
+
 def _heuristic_score(text: str) -> float:
     """Nilai draft tanpa LLM call — pilih yang paling natural dari 2 kandidat."""
     if not text or text == "SKIP":
@@ -307,6 +354,14 @@ def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
     }
     sentiment_block = sentiment_hints.get(sentiment, "")
 
+    # ── pre-classify intention ────────────────────────────────────────────────
+    intention      = _classify_intention(caption, sentiment)
+    intention_line = (
+        f"\n\n⚡ GAYA WAJIB untuk post ini: '{intention}'"
+        f" — gunakan HANYA gaya ini"
+    )
+    print(f"  [INTENTION] Klasifikasi: {intention}")
+
     # ── memory komentar kita sendiri ──────────────────────────────────────────
     memory_prompt = comment_memory.build_memory_prompt(n=8)
 
@@ -342,6 +397,7 @@ def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
                       .replace("{others_comments}", others_block))
         if engagement_constraint:
             sys_prompt += engagement_constraint
+        sys_prompt += intention_line
         user_prompt = caption
     else:
         persona_line = f"\nLATAR BELAKANG LO: {persona}\n" if persona else ""
@@ -382,7 +438,7 @@ CONTOH JELEK (keliatan AI):
 {others_block}
 
 komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
-{memory_prompt}{engagement_constraint}"""
+{memory_prompt}{engagement_constraint}{intention_line}"""
         user_prompt = caption
 
     def _do_generate():
