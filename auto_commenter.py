@@ -25,6 +25,35 @@ import config_loader
 import comment_memory
 from services.session_manager import SessionManager, SessionStatus
 
+
+class SessionExpiredError(Exception):
+    """Threads mengembalikan 401/403 — credentials sudah kadaluarsa."""
+
+
+class RateLimitError(Exception):
+    """Threads mengembalikan 429 — terlalu banyak request."""
+    def __init__(self, retry_after: int = 60):
+        self.retry_after = retry_after
+        super().__init__(f"Rate limited {retry_after}s")
+
+
+class _RateBackoff:
+    """Catat event rate-limit dan hitung sleep adaptif (exponential, max 1 jam)."""
+    def __init__(self):
+        self._events: list = []
+
+    def record(self):
+        now = time.time()
+        self._events = [t for t in self._events if now - t < 3600]
+        self._events.append(now)
+        stats_tracker.log_error(f"Rate limited (event #{len(self._events)} dalam 1 jam terakhir)")
+
+    def sleep_seconds(self, base: int = 60) -> int:
+        return min(base * (2 ** max(0, len(self._events) - 1)), 3600)
+
+
+_rate_backoff = _RateBackoff()
+
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
@@ -159,6 +188,24 @@ def _quality_check(text: str) -> bool:
     if formal_words >= 3:
         return False
     return True
+
+
+def _score_post_engagement(caption: str) -> int:
+    """LLM nilai 1–5: seberapa besar potensi komentar kita dibalas.
+    1 = pengumuman/generik, 5 = curhat/nanya/hot-take yang jelas butuh respon.
+    """
+    prompt = (
+        "Nilai postingan Threads ini 1–5 untuk potensi engagement (komentar dibalas orang).\n"
+        "1 = pengumuman/promosi/generik, 5 = curhat/nanya/hot-take yang butuh respon.\n"
+        "Jawab HANYA angka.\n\n"
+        f"Post: {caption[:150]}"
+    )
+    try:
+        resp = llm_router.generate(prompt)
+        m = re.search(r'\b[1-5]\b', resp)
+        return int(m.group()) if m else 3
+    except Exception:
+        return 3
 
 
 def _classify_intention(caption: str, sentiment: str) -> str:
@@ -606,11 +653,19 @@ def post_reply(session, post_id: str, text: str) -> Optional[str]:
 
     try:
         resp = session.post(REPLY_ENDPOINT, data=payload, headers=headers, timeout=30)
+        if resp.status_code in (401, 403):
+            raise SessionExpiredError(f"post_reply HTTP {resp.status_code}")
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            _rate_backoff.record()
+            raise RateLimitError(retry_after)
         if resp.status_code == 200:
             media = resp.json().get("media") or {}
             result = media.get("pk") or media.get("id")
             return str(result) if result else None
         return None
+    except (SessionExpiredError, RateLimitError):
+        raise
     except Exception as e:
         print(f"[REPLY_ERROR] {e}")
         return None
@@ -715,6 +770,12 @@ def fetch_timeline(session, tokens: Dict[str, str], query_config: Dict[str, str]
     try:
         resp = session.post(GRAPHQL_URL, data=payload, headers=headers, timeout=30)
         print(f"[DEBUG] fetch_timeline status code: {resp.status_code}")
+        if resp.status_code in (401, 403):
+            raise SessionExpiredError(f"fetch_timeline HTTP {resp.status_code}")
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            _rate_backoff.record()
+            raise RateLimitError(retry_after)
         if resp.status_code != 200:
             print(f"[DEBUG] fetch_timeline error response: {resp.text[:500]}")
             return None
@@ -987,7 +1048,23 @@ def process_timeline(session):
             print("[TREND_FALLBACK] Tidak ada postingan yang lolos kriteria, pakai urutan acak.")
             random.shuffle(posts)
     else:
-        random.shuffle(posts)
+        # Normal mode: LLM score top-5 candidates lalu urutkan
+        pre_sort = sorted(
+            posts,
+            key=lambda p: (p.get("like_count") or 0) + (p.get("reply_count") or 0) * 3,
+            reverse=True,
+        )
+        top5 = pre_sort[:5]
+        print(f"[POST_SCORE] Scoring {len(top5)} kandidat teratas…")
+        for p in top5:
+            sc = _score_post_engagement(p.get("caption", ""))
+            p["_eng_score"] = sc
+            print(f"  {sc}/5 @{p.get('username','?')}: {p.get('caption','')[:60]}")
+        top5.sort(
+            key=lambda p: (p["_eng_score"], (p.get("like_count") or 0) + (p.get("reply_count") or 0) * 3),
+            reverse=True,
+        )
+        posts = top5 + pre_sort[5:]
 
     # Kumpulkan post_id yang sudah pernah dikomentari (24 jam terakhir)
     commented_ids = {e["post_id"] for e in reply_cache.get_recent_post_ids(max_age_hours=24)}
@@ -1093,12 +1170,39 @@ def main():
             else:
                 fail_streak += 1
                 if fail_streak >= 5:
-                    print(f"[HEALTH] {fail_streak}× gagal berturut-turut — session mungkin expired. Tidur 30 menit.")
-                    stats_tracker.log_error("Possible session expired (5x consecutive fetch failures)")
-                    time.sleep(1800)
-                    fail_streak = 0
+                    print(f"[HEALTH] {fail_streak}× gagal berturut-turut — coba re-auth…")
+                    sm2 = SessionManager()
+                    if sm2.load_session() and sm2.validate_session().status == SessionStatus.VALID:
+                        session = sm2.inject_session()
+                        sm = sm2
+                        fail_streak = 0
+                        print("[AUTH] Re-auth berhasil setelah streak gagal, lanjut…")
+                    else:
+                        print("[AUTH] Re-auth gagal — tidur 30 menit.")
+                        stats_tracker.log_error("5x failures, re-auth failed")
+                        time.sleep(1800)
+                        fail_streak = 0
                 else:
                     time.sleep(60)
+
+        except SessionExpiredError as e:
+            print(f"[AUTH] Session expired: {e}")
+            print("[AUTH] Mencoba reload credentials dari .env…")
+            sm2 = SessionManager()
+            if sm2.load_session() and sm2.validate_session().status == SessionStatus.VALID:
+                session = sm2.inject_session()
+                sm = sm2
+                fail_streak = 0
+                print("[AUTH] Re-auth berhasil, lanjut…")
+            else:
+                print("[AUTH] Re-auth gagal — session benar-benar expired. Tidur 30 menit.")
+                stats_tracker.log_error(f"SessionExpired + re-auth failed: {e}")
+                time.sleep(1800)
+
+        except RateLimitError as e:
+            sleep_s = _rate_backoff.sleep_seconds(e.retry_after)
+            print(f"[RATE_LIMIT] Terdeteksi — tidur {sleep_s}d (backoff event #{len(_rate_backoff._events)})")
+            time.sleep(sleep_s)
 
         except Exception as e:
             stats_tracker.log_error(str(e))
