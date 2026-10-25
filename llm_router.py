@@ -15,7 +15,6 @@ _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 QODER_BIN = os.getenv("QODER_BIN", "").strip() or shutil.which("qoder") or "qoder"
 QODER_MODEL = os.getenv("QODER_MODEL", "").strip()
 QODER_TIMEOUT = int(os.getenv("QODER_TIMEOUT", "180"))
-QODER_MAX_TOKENS = os.getenv("QODER_MAX_TOKENS", "120").strip()
 
 # --tools "" mematikan semua tool supaya Qoder cuma menghasilkan teks,
 # tidak menyentuh filesystem atau menjalankan perintah apapun.
@@ -24,8 +23,19 @@ _BASE_ARGS = [
     "--tools", "",
     "--no-session-persistence",
     "--setting-sources", "",
-    "--max-output-tokens", QODER_MAX_TOKENS,
 ]
+
+
+def _get_max_tokens() -> str:
+    """Baca max_tokens secara dinamis dari env atau config (mendukung live update dari UI)."""
+    env_val = os.getenv("QODER_MAX_TOKENS", "").strip()
+    if env_val:
+        return env_val
+    try:
+        import config_loader
+        return str(config_loader.get("max_tokens") or 120)
+    except Exception:
+        return "120"
 
 
 def is_available() -> bool:
@@ -39,7 +49,7 @@ def generate(prompt: str, system_prompt: str = "") -> str:
     memisahkan konteks/aturan dari pesan pengguna — mencegah format markdown
     multi-bagian di output.
     """
-    args = [QODER_BIN, *_BASE_ARGS]
+    args = [QODER_BIN, *_BASE_ARGS, "--max-output-tokens", _get_max_tokens()]
     if QODER_MODEL:
         args += ["-m", QODER_MODEL]
     if system_prompt:

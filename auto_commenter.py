@@ -22,6 +22,7 @@ import reply_cache
 import agent_loader
 import llm_router
 import config_loader
+import comment_memory
 from services.session_manager import SessionManager, SessionStatus
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
@@ -31,10 +32,11 @@ ANTI_AI_PROMPT = ""
 
 _comment_history = []
 
-THREADS_HOME       = "https://www.threads.com/"
-GRAPHQL_URL        = "https://www.threads.com/graphql/query"
-LIKE_DOC_ID        = "24753372994365040"
-LIKE_FRIENDLY_NAME = "useTHLikeMutationLikeMutation"
+THREADS_HOME        = "https://www.threads.com/"
+GRAPHQL_URL         = "https://www.threads.com/graphql/query"
+LIKE_DOC_ID         = "24753372994365040"
+LIKE_FRIENDLY_NAME  = "useTHLikeMutationLikeMutation"
+THREAD_ITEMS_URL    = "https://www.threads.com/api/v1/text_feed/{}/thread_items/"
 GRAPHQL_DUMP  = "graphql_dump.json"
 REPLY_ENDPOINT = "https://www.threads.com/api/v1/media/configure_text_only_post/"
 AUTO_MODE = True
@@ -121,62 +123,213 @@ def parse_ai_reply(reply: str) -> str:
 
     return cleaned_reply
 
-def generate_reply(caption: str) -> str:
-    global _comment_history
+# ── banned phrases untuk quality filter ──────────────────────────────────────
+_AI_SOUNDING_PATTERNS = re.compile(
+    r'^(wah[,!\s]|haha[,!\s]|hehe[,!\s]?|oh wow|relate banget|keren banget|semangat|'
+    r'pasti bisa|luar biasa|sangat\s|betul sekali|memang benar|tentu saja|'
+    r'tentu aja|pastinya|yep[,!\s]|yap[,!\s]|iya banget|benar banget)',
+    re.IGNORECASE,
+)
+_AI_FILLER_PHRASES = re.compile(
+    r'(semangat terus|pasti bisa|luar biasa|sangat bermanfaat|sangat membantu|'
+    r'jangan lupa|tetap semangat|keep it up|you got this|inspiring banget|'
+    r'keren banget sih|mantap jiwa|top banget|bagus banget sih)',
+    re.IGNORECASE,
+)
 
-    recent_comments = "\n".join([f"- {c}" for c in _comment_history]) if _comment_history else "(Belum ada komentar sebelumnya)"
+
+def _quality_check(text: str) -> bool:
+    """
+    True = komentar lolos, False = terdeteksi pola AI / tidak natural.
+    Dicek SEBELUM posting; kalau False, generate ulang sekali.
+    """
+    if not text or len(text) < 4:
+        return False
+    if len(text) > 220:
+        return False
+    if _AI_SOUNDING_PATTERNS.search(text):
+        return False
+    if _AI_FILLER_PHRASES.search(text):
+        return False
+    # Terlalu banyak tanda seru = hype berlebihan
+    if text.count('!') > 2:
+        return False
+    # Kalimat terlalu panjang & formal (ada "yang" + "untuk" + "adalah" dalam 1 teks)
+    formal_words = sum(1 for w in ['yang', 'untuk', 'adalah', 'merupakan', 'dalam rangka'] if w in text.lower())
+    if formal_words >= 3:
+        return False
+    return True
+
+
+def detect_post_sentiment(caption: str) -> str:
+    """
+    Deteksi mood postingan: frustrated | win | question | opinion | info
+    Dipakai untuk menyesuaikan nada komentar.
+    """
+    low = caption.lower()
+
+    frustrated_signals = [
+        'stuck', 'error terus', 'nyerah', 'cape', 'capek', 'hopeless',
+        'mau nangis', 'susah banget', 'ga bisa-bisa', 'ga ngerti', 'frustasi',
+        'kesel', 'desperate', 'udah berapa jam', 'udah berapa hari', 'ga jalan',
+        'kenapa sih', 'kok ga bisa', 'masih error', 'error lagi',
+    ]
+    win_signals = [
+        'berhasil', 'akhirnya', 'finally', 'solved', 'done', 'selesai',
+        'yeay', 'yay', 'alhamdulillah', 'bisa juga', 'gue berhasil',
+        'deploy berhasil', 'udah jalan', 'udah bisa',
+    ]
+    question_signals = [
+        'ada yang tau', 'ada yang pernah', 'gimana cara', 'minta saran',
+        'tolong bantu', 'recommend', 'rekomendasi', 'ada yang bisa',
+        'bantuin dong', 'cara nya gimana', 'kalian gimana',
+    ]
+    opinion_signals = [
+        'menurut gue', 'menurut lo', 'tbh', 'ngl', 'fight me',
+        'unpopular opinion', 'hot take', 'gue rasa', 'kayaknya sih',
+        'beda sama', 'kontroversial',
+    ]
+
+    if any(s in low for s in frustrated_signals):
+        return "frustrated"
+    if any(s in low for s in win_signals):
+        return "win"
+    if low.strip().endswith('?') or any(s in low for s in question_signals):
+        return "question"
+    if any(s in low for s in opinion_signals):
+        return "opinion"
+    return "info"
+
+
+def detect_thread_tone(replies: List[str]) -> str:
+    """
+    Analisis komentar yang sudah ada di thread untuk deteksi tone dominan.
+    Return: "nanya" | "sharing" | "debat" | "mixed"
+    """
+    if not replies:
+        return "mixed"
+
+    nanya   = sum(1 for r in replies if r.strip().endswith("?") or
+                  re.search(r'\b(gimana|kenapa|berapa|apa|siapa|kapan|blm|solved|pake apa)\b', r.lower()))
+    saran   = sum(1 for r in replies if
+                  re.search(r'\b(coba|mending|pake|gunain|harusnya|install|bisa)\b', r.lower()))
+    debat   = sum(1 for r in replies if
+                  re.search(r'\b(ga setuju|beda pendapat|menurutku|sebenarnya|justru|malah|bukan)\b', r.lower()))
+
+    total = len(replies)
+    if total == 0:
+        return "mixed"
+    if nanya / total > 0.5:
+        return "nanya"
+    if debat / total > 0.4:
+        return "debat"
+    if saran / total > 0.5:
+        return "sharing"  # banyak saran = thread sharing pengalaman/solusi
+    return "mixed"
+
+
+def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
+    """
+    Generate komentar natural.
+
+    existing_replies: komentar orang lain yang sudah ada di thread ini
+    """
+    cfg = config_loader.load()
+
+    # ── persona konsisten ─────────────────────────────────────────────────────
+    persona = cfg.get("bot_persona", "").strip()
+
+    # ── deteksi sentiment postingan ───────────────────────────────────────────
+    sentiment = detect_post_sentiment(caption)
+    sentiment_hints = {
+        "frustrated": "postingan ini curhat/frustasi — empati dulu, JANGAN langsung kasih solusi atau saran",
+        "win":        "postingan ini cerita berhasil — ikut relate atau share pengalaman serupa, jangan nanya 'udah solved?'",
+        "question":   "postingan ini nanya sesuatu — lo bisa jawab singkat atau nanya balik kalau penasaran",
+        "opinion":    "postingan ini opini/hot take — lo bisa setuju, nuansi, atau share perspektif lo sendiri",
+        "info":       "",
+    }
+    sentiment_block = sentiment_hints.get(sentiment, "")
+
+    # ── memory komentar kita sendiri ──────────────────────────────────────────
+    memory_prompt = comment_memory.build_memory_prompt(n=8)
+
+    # ── deteksi tone thread ───────────────────────────────────────────────────
+    thread_tone = detect_thread_tone(existing_replies or [])
+    tone_hints = {
+        "nanya":   "thread ini banyak yang nanya — lo bisa jawab/relate atau nanya lanjut",
+        "sharing": "thread ini banyak yang share solusi — react/nanya juga oke, jangan saran lagi",
+        "debat":   "thread ini ada debat kecil — hindari trigger debat, cukup react atau nanya netral",
+        "mixed":   "",
+    }
+    tone_block = tone_hints.get(thread_tone, "")
+
+    # ── konteks komentar orang lain ───────────────────────────────────────────
+    if existing_replies:
+        others_block = "komentar orang lain yang SUDAH ADA di thread ini (jangan duplikat):\n"
+        others_block += "\n".join(f'- "{r[:80]}"' for r in existing_replies[:5])
+        hint = tone_block or "kalau orang-orang nanya, lo bisa jawab/relate. kalau udah banyak saran, jangan saran lagi."
+        others_block += f"\n→ {hint}"
+    else:
+        others_block = "(belum ada komentar lain di thread ini)"
 
     base_prompt = agent_loader.load_agent('threads-natural-commenter-agent')
 
-    if base_prompt:
-        sys_prompt = base_prompt.replace("{recent_comments}", recent_comments)
-        user_prompt = f"{caption}"
-    else:
-        sys_prompt = f"""lo orang IT Indonesia yang sering buka Threads. kalau nemu postingan yang relate, lo nimbrung — tapi lo BUKAN asisten, lo bukan guru, lo cuma orang yang lagi scroll sambil rebahan.
+    # Bangun blok sentiment (hanya tampil kalau ada)
+    sentiment_line = f"\n⚡ KONTEKS: {sentiment_block}" if sentiment_block else ""
 
+    if base_prompt:
+        sys_prompt = (base_prompt
+                      .replace("{persona}", persona)
+                      .replace("{sentiment}", sentiment_line)
+                      .replace("{recent_comments}", memory_prompt)
+                      .replace("{others_comments}", others_block))
+        user_prompt = caption
+    else:
+        persona_line = f"\nLATAR BELAKANG LO: {persona}\n" if persona else ""
+        sys_prompt = f"""lo orang IT Indonesia yang sering buka Threads. kalau nemu postingan yang relate, lo nimbrung — tapi lo BUKAN asisten, lo bukan guru, lo cuma orang yang lagi scroll sambil rebahan.
+{persona_line}
 TIPE KOMENTAR (pilih yang paling pas, bukan selalu kasih saran):
 
 1. NANYA — lo penasaran, mau lanjutin obrolan
    contoh: "ini udah solved blm?"
    contoh: "lo pake apa akhirnya?"
    contoh: "framework-nya apa emg?"
-   contoh: "berapa lama sampe kelar?"
-   contoh: "ini production apa dev?"
 
 2. REACT / NGOBROL — lo cuma relate, ga perlu kasih apa-apa
    contoh: "ini gue banget kemarin"
    contoh: "serius? gue kira cuma gue doang"
-   contoh: "nah ini dia"
    contoh: "anjir sama persis"
-   contoh: "haha duh familiar banget"
-   contoh: "ini kenapa relate parah sih"
 
 3. SHARE SINGKAT — lo pernah ngalamin, share dikit aja
    contoh: "gue kemarin 3 hari stuck di sini"
-   contoh: "blm kelar juga dari minggu lalu ini"
    contoh: "sama, akhirnya gue tinggalin aja dulu"
 
 4. SARAN (JARANG — hanya kalau beneran natural, bukan default)
    contoh: "coba cek log-nya dulu sih"
-   contoh: "pernah coba pakai x dulu?"
 
 POLA NULIS:
-- 1 kalimat pendek. kadang cuma 4–6 kata aja udah cukup
+- 1 kalimat pendek, kadang 4–6 kata cukup
 - bahasa santai: "gue", "lo", "sih", "aja", "emg", "blm", "udh", "tp", "jg", "yg"
 - boleh typo kecil biar keliatan manusia beneran
 - JANGAN mulai dengan "Wah", "Haha", "Hehe", "Oh", "Ya", "Iya", "Relate banget"
-- JANGAN kasih saran kalau ga diminta — itu bikin keliatan bot/AI
+- JANGAN kasih saran kalau ga diminta
 - DILARANG: link, nama produk spesifik, promosi
 - kalau postingan duka/politik panas/NSFW: balas SKIP
 
-CONTOH JELEK (keliatan AI — jangan begini):
+CONTOH JELEK (keliatan AI):
 "Relate banget nih! Emang susah sih, coba mulai dari yang simpel dulu biar ga overwhelming."
-"Wah keren banget progress lo! Semangat terus ya, pasti bisa!"
-"Mungkin bisa dicoba pakai Docker aja biar lebih konsisten environment-nya."
+"Wah keren banget progress lo! Semangat terus ya, pasti bisa!"{sentiment_line}
 
-komentar terakhir lo (jangan ulangi pola/nada yang sama):
-{recent_comments}"""
+{others_block}
+
+komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
+{memory_prompt}"""
         user_prompt = caption
+
+    def _do_generate():
+        r = llm_router.generate(user_prompt, system_prompt=sys_prompt)
+        print(f"\n[RAW LLM]: {r}")
+        return parse_ai_reply(r)
 
     try:
         cached_reply = reply_cache.check_cache(caption)
@@ -186,34 +339,67 @@ komentar terakhir lo (jangan ulangi pola/nada yang sama):
                 return "SKIP"
             return parsed_cache
 
-        reply = llm_router.generate(user_prompt, system_prompt=sys_prompt)
-        
-        print("\n========== ROUTER DEBUG ==========")
-        print(f"[RAW LLM RESPONSE]: {reply}")
-        print("==================================\n")
-
-        reply = parse_ai_reply(reply)
+        reply = _do_generate()
         if reply == "SKIP":
             return "SKIP"
 
-        print("\n========== FINAL DEBUG ==========")
-        print(f"[FINAL REPLY]: {reply}")
-        print(f"[FINAL LENGTH]: {len(reply)}")
-        print("=================================\n")
-        
-        reply_cache.save_to_cache(caption, reply)
+        # ── quality filter — regenerate sekali kalau gagal ────────────────────
+        if not _quality_check(reply):
+            print(f"  [QC] Gagal quality check: '{reply[:60]}' — regenerate…")
+            reply = _do_generate()
+            if reply == "SKIP":
+                return "SKIP"
+            if not _quality_check(reply):
+                print(f"  [QC] Masih gagal setelah regenerate — pakai hasil terakhir")
+
+        print(f"[FINAL]: {reply} ({len(reply)} kar)\n")
+
+        comment_memory.save(caption, reply, post_sentiment=sentiment)
+
         _comment_history.append(reply)
         if len(_comment_history) > 3:
             _comment_history.pop(0)
-            
+
         return reply
     except Exception as exc:
-        # Jangan pernah mengembalikan teks error: process_timeline hanya menyaring
-        # "SKIP", jadi string lain akan benar-benar ter-post ke Threads.
         stats_tracker.log_error(f"LLM Router Error: {exc}")
         stats_tracker.increment("llm_errors")
         logger.error("Gagal membuat balasan: %s", exc)
         return "SKIP"
+
+def fetch_post_replies(session, post_id: str) -> List[str]:
+    """
+    Ambil komentar yang sudah ada di thread.
+    Dipakai sebagai konteks prompt agar bot tidak duplikat & sesuai tone obrolan.
+    """
+    headers = dict(BASE_HEADERS)
+    del headers["x-fb-friendly-name"]  # tidak perlu untuk REST GET
+    csrf = session.cookies.get("csrftoken")
+    if csrf:
+        headers["x-csrftoken"] = csrf
+
+    try:
+        resp = session.get(THREAD_ITEMS_URL.format(post_id), headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+
+        data  = resp.json()
+        items = data.get("thread_items") or data.get("items") or []
+        replies = []
+        for item in items:
+            media    = item.get("media") or item
+            text_app = media.get("text_post_app_info") or {}
+            # hanya ambil yang merupakan reply (ada reply_to_author), skip root post
+            if not text_app.get("reply_to_author"):
+                continue
+            cap = (media.get("caption") or {}).get("text", "").strip()
+            if cap and 5 < len(cap) < 200:
+                replies.append(cap)
+
+        return replies[:6]   # max 6 reply untuk prompt
+    except Exception:
+        return []
+
 
 def like_post(session, tokens: Dict[str, str], post_id: str) -> bool:
     """Like sebuah post sebelum komentar agar lebih natural."""
@@ -246,7 +432,8 @@ def like_post(session, tokens: Dict[str, str], post_id: str) -> bool:
         return False
 
 
-def post_reply(session, post_id: str, text: str) -> bool:
+def post_reply(session, post_id: str, text: str) -> Optional[str]:
+    """Kirim reply ke post_id. Return media_pk komentar baru jika berhasil, None jika gagal."""
     csrf = (
         session.cookies.get("csrftoken", domain=".threads.com")
         or session.cookies.get("csrftoken")
@@ -271,27 +458,48 @@ def post_reply(session, post_id: str, text: str) -> bool:
         "x-csrftoken":   csrf,
     }
 
-    data = urlencode({
+    payload = urlencode({
         "caption": text,
         "barcelona_source_reply_id": post_id,
         "publish_mode": "text_post",
         "upload_id": str(int(time.time() * 1000)),
         "text_post_app_info": json.dumps({"reply_id": post_id, "entry_point": "create_reply", "text_with_entities": {"entities": [], "text": text}}),
     })
-    
+
     try:
-        resp = session.post(REPLY_ENDPOINT, data=data, headers=headers, timeout=30)
-        return resp.status_code == 200
+        resp = session.post(REPLY_ENDPOINT, data=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            media = resp.json().get("media") or {}
+            result = media.get("pk") or media.get("id")
+            return str(result) if result else None
+        return None
     except Exception as e:
         print(f"[REPLY_ERROR] {e}")
-        return False
+        return None
 
 def human_delay():
-    cfg   = config_loader.load()
-    lo    = int(cfg["delay_min_minutes"]) * 60
-    hi    = int(cfg["delay_max_minutes"]) * 60
-    delay = random.randint(lo, max(lo, hi))
-    print(f"\n[INFO] Bot beristirahat {int(delay/60)} menit agar natural...")
+    cfg = config_loader.load()
+    lo  = int(cfg["delay_min_minutes"]) * 60
+    hi  = int(cfg["delay_max_minutes"]) * 60
+
+    # Smart peak-hour: sesuaikan delay berdasarkan pola aktivitas nyata
+    multiplier = 1.0
+    try:
+        peak_hours   = reply_cache.get_peak_hours(top_n=5)
+        current_hour = datetime.now().hour
+        if peak_hours and current_hour in peak_hours:
+            multiplier = 0.75
+            print(f"  [SMART_DELAY] Jam peak ({current_hour:02d}:xx) — delay ×0.75")
+        elif 1 <= current_hour <= 5:
+            multiplier = 2.0
+            print(f"  [SMART_DELAY] Dini hari ({current_hour:02d}:xx) — delay ×2.0")
+    except Exception:
+        pass
+
+    lo_adj = max(5 * 60, int(lo * multiplier))
+    hi_adj = max(lo_adj, int(hi * multiplier))
+    delay  = random.randint(lo_adj, hi_adj)
+    print(f"\n[INFO] Bot beristirahat {int(delay/60)} menit agar natural…")
     time.sleep(delay)
 
 def load_latest_query_config() -> Dict[str, str]:
@@ -420,6 +628,36 @@ def extract_posts(json_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return posts
 
+# Konten sensitif — selalu SKIP, tidak perlu check keyword IT/AI
+_SENSITIVE_PATTERNS = [
+    # Duka / kematian
+    r'\b(innalillahi|inna lillahi|semoga husnul khotimah|almarhum|almarhumah|'
+    r'meninggal|telah tiada|berpulang|duka cita|turut berduka|rip\b|rest in peace)\b',
+    # SARA / agama keras
+    r'\b(kafir|murtad|sesat|neraka kalian|azab|haram banget lo|dasar munafik)\b',
+    # Politik panas
+    r'\b(coblos|golput|pilkada|pilpres|calon presiden|caleg|partai [a-z]+|'
+    r'rezim|turunkan presiden|people power|#reformasi)\b',
+    # Promosi / iklan / MLM
+    r'\b(harga promo|diskon [0-9]+%|hubungi wa|wa kami|link bio|order sekarang|'
+    r'limited stock|stok terbatas|garansi uang kembali|passive income|cuan jutaan)\b',
+    # Hoax signals
+    r'\b(viralkan|sebarkan|jangan sampai|ini nyata|ini fakta|bukti sudah ada|'
+    r'share sebelum dihapus|tersebar|bocoran)\b',
+]
+_SENSITIVE_RE = [re.compile(p, re.IGNORECASE) for p in _SENSITIVE_PATTERNS]
+
+
+def is_sensitive_content(caption: str) -> str:
+    """Return kategori kalau konten sensitif, kosong kalau aman."""
+    low = caption.lower()
+    categories = ["duka/kematian", "SARA", "politik", "promosi/iklan", "hoax"]
+    for pattern, category in zip(_SENSITIVE_RE, categories):
+        if pattern.search(low):
+            return category
+    return ""
+
+
 _LOKER_KEYWORDS = [
     "lowongan", "loker", "hiring", "we are hiring", "open rekrutmen",
     "open recruitment", "open position", "open vacancy", "dicari karyawan",
@@ -429,36 +667,53 @@ _LOKER_KEYWORDS = [
     "walk in interview", "walk-in interview",
 ]
 
+# Keyword yang aman untuk substring match (panjang/spesifik, tidak ada risiko false positive)
 _IT_AI_KEYWORDS = [
     # Umum coding & dev
     "ngoding", "coding", "programmer", "developer", "programming",
-    "bug", "debug", "error", "deploy", "repository", "repo", "commit",
+    "debug", "deploy", "repository", "commit",
     "pull request", "merge", "refactor", "framework", "library",
     # Bahasa & stack
-    "python", "javascript", "typescript", "php", "java", "golang", "rust",
-    "c++", "kotlin", "swift", "ruby", "dart", "flutter", "react", "nextjs",
-    "vue", "angular", "laravel", "django", "fastapi", "nodejs", "node.js",
-    "sql", "nosql", "mongodb", "postgresql", "mysql", "redis",
+    "python", "javascript", "typescript", "golang", "flutter", "nextjs",
+    "angular", "laravel", "django", "fastapi", "nodejs", "node.js",
+    "nosql", "mongodb", "postgresql", "mysql", "redis",
     # Infra & tools
     "linux", "ubuntu", "docker", "kubernetes", "k8s", "ci/cd", "devops",
-    "cloud", "aws", "gcp", "azure", "server", "api", "microservice",
-    "vps", "nginx", "apache", "git", "github", "gitlab", "terminal",
+    "microservice", "nginx", "apache", "github", "gitlab",
     "xampp", "laragon", "wsl",
     # Perangkat & IT umum
-    "laptop", "pc build", "komputer", "hardware", "spek", "ram", "gpu",
-    "network", "jaringan", "vpn", "firewall", "cybersecurity", "hacking",
-    "pentesting", "vulnerability",
+    "komputer", "hardware", "cybersecurity", "hacking",
+    "pentesting", "vulnerability", "firewall",
     # AI & ML
-    " ai ", "artificial intelligence", "machine learning", " ml ",
-    "deep learning", "neural network", "llm", "large language model",
-    "chatgpt", "gpt-", "claude", "gemini", "copilot", "qoder",
+    "artificial intelligence", "machine learning",
+    "deep learning", "neural network", "large language model",
+    "chatgpt", "copilot", "qoder",
     "midjourney", "stable diffusion", "generative ai", "prompt engineer",
-    "dataset", "fine-tuning", "inference", "huggingface", "langchain",
-    "rag ", "vector db", "embedding",
+    "fine-tuning", "huggingface", "langchain", "vector db", "embedding",
     # Startup & tech
-    "startup", "saas", "software engineer", "tech stack", "mvp",
+    "startup", "saas", "software engineer", "tech stack",
     "product manager", "ui/ux", "figma", "wireframe",
 ]
+
+# Keyword pendek/ambigu — harus cocok sebagai KATA UTUH (word boundary)
+# Contoh bug: "api" ↔ "tapi", "git" ↔ "gitu", "ram" ↔ "program"
+_IT_AI_WORD_KEYWORDS = [
+    "bug", "error", "server", "cloud", "api", "git", "repo", "sql",
+    "php", "java", "rust", "vue", "ruby", "dart", "react", "swift", "kotlin",
+    "aws", "gcp", "azure", "vps", "gpu", "ram", "vpn",
+    "llm", "mvp", "rag",
+    "laptop", "pc", "spek", "network", "jaringan",
+    "terminal", "coding", "ngoding",
+]
+
+
+# Konteks non-IT yang bisa memicu false positive pada keyword umum
+_CONTEXT_EXCLUSIONS = {
+    # "developer" bisa = developer properti/perumahan di Indonesia
+    "developer": ["perumahan", "properti", "apartemen", "kpr", "rumah", "kavling", "tanah", "ruko"],
+    # "network" bisa = network marketing / MLM
+    "network":   ["marketing", "mlm", "bisnis", "member", "downline", "upline", "reseller"],
+}
 
 
 def should_comment(caption: str) -> tuple[bool, str]:
@@ -466,16 +721,42 @@ def should_comment(caption: str) -> tuple[bool, str]:
     low  = caption.lower()
     cfg  = config_loader.load()
 
-    loker_kws  = _LOKER_KEYWORDS  + [k.lower() for k in cfg.get("loker_keywords_extra",  [])]
-    it_ai_kws  = _IT_AI_KEYWORDS  + [k.lower() for k in cfg.get("it_ai_keywords_extra", [])]
+    loker_kws      = _LOKER_KEYWORDS       + [k.lower() for k in cfg.get("loker_keywords_extra",  [])]
+    it_ai_kws      = _IT_AI_KEYWORDS       + [k.lower() for k in cfg.get("it_ai_keywords_extra", [])]
+    it_ai_word_kws = _IT_AI_WORD_KEYWORDS
 
+    # Cek konten sensitif paling awal (duka/SARA/politik/promosi/hoax)
+    sensitive = is_sensitive_content(caption)
+    if sensitive:
+        return False, f"konten sensitif ({sensitive})"
+
+    # Cek loker dulu
     for kw in loker_kws:
         if kw in low:
             return False, f"lowongan kerja ({kw!r})"
 
+    def _context_ok(kw: str) -> bool:
+        """False jika keyword match tapi konteksnya non-IT."""
+        exclusions = _CONTEXT_EXCLUSIONS.get(kw, [])
+        return not any(exc in low for exc in exclusions)
+
+    # Substring match (keyword panjang/spesifik — aman)
     for kw in it_ai_kws:
         if kw in low:
+            if not _context_ok(kw):
+                continue
             return True, f"topik IT/AI ({kw!r})"
+
+    # Word-boundary match (keyword pendek — hindari false positive seperti "api"→"tapi")
+    for kw in it_ai_word_kws:
+        if re.search(r'\b' + re.escape(kw) + r'\b', low):
+            if not _context_ok(kw):
+                continue
+            return True, f"topik IT/AI word ({kw!r})"
+
+    # ai/ml: hindari match "email", "trail", "gmail", dll
+    if re.search(r'(?<!\w)ai(?!\w)', low) or re.search(r'(?<!\w)ml(?!\w)', low):
+        return True, "topik IT/AI (ai/ml)"
 
     return False, "tidak ada kata kunci IT/AI"
 
@@ -570,14 +851,27 @@ def process_timeline(session):
     else:
         random.shuffle(posts)
 
-    for p in posts[:1]:
+    # Kumpulkan post_id yang sudah pernah dikomentari (24 jam terakhir)
+    commented_ids = {e["post_id"] for e in reply_cache.get_recent_post_ids(max_age_hours=24)}
+
+    for p in posts:
         username = p.get("username", "?")
         post_id  = p.get("post_id",  "?")
         caption  = p.get("caption",  "")
 
+        # Skip kalau sudah pernah komentar di post ini, coba post berikutnya
+        if str(post_id) in commented_ids:
+            print(f"  [SKIP] Sudah pernah komentar di post {post_id}, coba post lain…")
+            continue
+
         print(f"\n[INFO] Menemukan target: @{username}")
 
-        reply_text = generate_reply(caption)
+        # Baca komentar orang lain yang sudah ada di thread ini
+        existing = fetch_post_replies(session, str(post_id))
+        if existing:
+            print(f"  [MEMORY] {len(existing)} komentar orang lain ditemukan di thread")
+
+        reply_text = generate_reply(caption, existing_replies=existing)
 
         if reply_text == "SKIP":
             print("  >> AI memutuskan SKIP (tidak relevan / terdeteksi link / banned phrase).")
@@ -599,16 +893,26 @@ def process_timeline(session):
                 time.sleep(random.randint(1, 3))
 
             # 2. Kirim komentar
-            success = post_reply(session, str(post_id), reply_text)
-            if success:
-                print("  >> Status Pengiriman: Berhasil!")
+            our_comment_id = post_reply(session, str(post_id), reply_text)
+            if our_comment_id is not None:
+                print(f"  >> Status Pengiriman: Berhasil! (comment_id={our_comment_id})")
                 stats_tracker.increment("comments_sent")
-                reply_cache.save_to_cache(caption, reply_text, post_id=str(post_id))
+                reply_cache.save_to_cache(
+                    caption, reply_text,
+                    post_id=str(post_id),
+                    comment_id=our_comment_id,
+                )
+                human_delay()
+                break  # satu komentar per siklus — berhasil
             else:
-                print("  >> Status Pengiriman: Gagal.")
+                print("  >> Status Pengiriman: Gagal, coba post berikutnya…")
                 stats_tracker.increment("comment_failures")
-
-        human_delay()
+                time.sleep(15)
+    else:
+        # Semua post sudah dikomentari — jeda pendek agar tidak hammering API
+        delay = random.randint(5 * 60, 10 * 60)
+        print(f"\n[INFO] Semua post dalam timeline sudah dikomentari. Jeda {delay // 60} menit…")
+        time.sleep(delay)
     return True
 
 def is_active_hours() -> bool:

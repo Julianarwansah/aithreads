@@ -15,6 +15,11 @@ poster_output.log
 ui_settings.json
 graphql_dump.json
 network_capture.json
+comment_memory.json
+growth_stats.json
+replied_cache.json
+watcher_output.log
+poster_last_post.json
 
 # === Python ===
 __pycache__/

@@ -14,19 +14,52 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
+# Pastikan output langsung di-flush ke log file (bukan buffered)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 from dotenv import load_dotenv
 load_dotenv()
 
+import re as _re
 import config_loader
+import comment_memory
 import llm_router
 import stats_tracker
 import reply_cache as rc
-from auto_commenter import post_reply, get_fresh_tokens
+from auto_commenter import post_reply, get_fresh_tokens, detect_post_sentiment
 from services.session_manager import SessionManager, SessionStatus
+
+# Kata-kata yang menandakan reply negatif/laporan terhadap komentar kita
+_NEGATIVE_REPLY_SIGNALS = [
+    'spam', 'bot', 'lapor', 'report', 'annoying', 'nyebelin', 'ganggu',
+    'berhenti', 'stop comment', 'ga minta pendapat', 'siapa lo', 'ngapain',
+    'unfollow', 'block', 'kenapa komen', 'lo siapa',
+]
+
+def _is_negative_reply(text: str) -> bool:
+    low = text.lower()
+    return any(sig in low for sig in _NEGATIVE_REPLY_SIGNALS)
+
+
+_blacklist_lock = threading.Lock()
+
+def _auto_blacklist(username: str):
+    """Tambah username ke blacklisted_accounts di config."""
+    if not username:
+        return
+    with _blacklist_lock:
+        cfg = config_loader.load()
+        blacklist = cfg.get("blacklisted_accounts", [])
+        if username.lower() not in [u.lower() for u in blacklist]:
+            blacklist.append(username)
+            config_loader.save({"blacklisted_accounts": blacklist})
+            print(f"  [AUTO-BLACKLIST] @{username} ditambahkan ke blacklist otomatis")
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -34,8 +67,8 @@ logger = logging.getLogger(__name__)
 _DIR = os.path.dirname(os.path.abspath(__file__))
 REPLIED_CACHE_FILE = os.path.join(_DIR, "replied_cache.json")
 
-# Endpoint thread items — GET request, butuh cookie auth
-THREAD_ITEMS_URL = "https://www.threads.com/api/v1/text_feed/{media_id}/thread_items/"
+# Endpoint komentar pada media tertentu (comment_id = pk komentar kita)
+COMMENTS_URL = "https://www.threads.com/api/v1/media/{media_id}/comments/"
 
 THREAD_HEADERS = {
     "accept":          "application/json, text/plain, */*",
@@ -77,63 +110,58 @@ def _mark_replied(reply_id: str, text: str):
     _save_replied(data)
 
 
-# ── fetch thread items ────────────────────────────────────────────────────────
-def fetch_thread_items(session, media_id: str) -> list:
-    """Fetch semua item dalam sebuah thread (root post + semua reply)."""
+# ── fetch replies to our comment ──────────────────────────────────────────────
+def fetch_comment_replies(session, comment_id: str) -> list:
+    """Fetch semua reply ke komentar kita (comment_id = pk komentar bot)."""
     headers = THREAD_HEADERS.copy()
     csrf = session.cookies.get("csrftoken")
     if csrf:
         headers["x-csrftoken"] = csrf
 
-    url = THREAD_ITEMS_URL.format(media_id=media_id)
+    url = COMMENTS_URL.format(media_id=comment_id)
     try:
         resp = session.get(url, headers=headers, timeout=20)
         if resp.status_code == 200:
             data = resp.json()
-            items = data.get("thread_items") or data.get("items") or []
-            print(f"  [THREAD] {len(items)} item di thread {media_id}")
+            items = data.get("comments") or []
+            print(f"  [COMMENT] {len(items)} reply ke komentar {comment_id}")
             return items
         else:
-            print(f"  [THREAD] HTTP {resp.status_code} untuk {media_id}")
+            print(f"  [COMMENT] HTTP {resp.status_code} untuk comment_id={comment_id}")
     except Exception as e:
-        print(f"  [THREAD] Error fetch: {e}")
+        print(f"  [COMMENT] Error fetch: {e}")
     return []
 
 
-# ── parse replies to us ───────────────────────────────────────────────────────
-def find_replies_to_us(thread_items: list, our_username: str) -> list:
+# ── parse replies dari comments endpoint ─────────────────────────────────────
+def find_replies_to_us(comment_items: list, our_username: str) -> list:
     """
-    Dari daftar thread items, kembalikan list reply yang ditujukan ke username kita.
-    Struktur item Threads: item["media"] → post object.
+    Dari daftar comment items (respons /api/v1/media/{comment_id}/comments/),
+    kembalikan semua reply. Karena ini sudah reply ke komentar kita,
+    semua item di sini relevan kecuali komentar kita sendiri.
     """
-    replies = []
-    for item in thread_items:
-        media = item.get("media") or item  # bisa langsung atau nested
-        user  = (media.get("user") or {})
+    replies  = []
+    seen_ids = set()
+
+    for item in comment_items:
+        user      = item.get("user") or {}
         commenter = user.get("username", "")
 
-        # Lewati kalau ini post kita sendiri
         if commenter.lower() == our_username.lower():
             continue
 
-        text_info   = media.get("text_post_app_info") or {}
-        reply_author = (text_info.get("reply_to_author") or {})
-        replied_to   = reply_author.get("username", "")
+        text = (item.get("text") or "").strip()
+        pk   = str(item.get("pk") or item.get("id") or "")
 
-        if replied_to.lower() != our_username.lower():
+        if not text or not pk or pk in seen_ids:
             continue
 
-        caption_text = (media.get("caption") or {}).get("text", "").strip()
-        media_pk     = str(media.get("pk") or media.get("id") or "")
-
-        if not caption_text or not media_pk:
-            continue
-
+        seen_ids.add(pk)
         replies.append({
-            "reply_id":   media_pk,
-            "commenter":  commenter,
-            "text":       caption_text,
-            "taken_at":   media.get("taken_at") or 0,
+            "reply_id":  pk,
+            "commenter": commenter,
+            "text":      text,
+            "taken_at":  item.get("taken_at") or 0,
         })
     return replies
 
@@ -145,7 +173,19 @@ def generate_watcher_reply(
     original_caption: str,
 ) -> str:
     """Buat balasan natural ke orang yang reply ke komentar kita."""
-    sys_prompt = """lo lagi ngobrol di Threads, ada orang yang balas komentar lo.
+    # Deteksi sentiment balasan mereka untuk sesuaikan tone
+    sentiment = detect_post_sentiment(their_reply)
+    sentiment_guidance = {
+        "frustrated": "mereka kayaknya frustrasi — empati dulu, jangan langsung kasih solusi",
+        "win":        "mereka share hal positif — ikut relate atau react seneng",
+        "question":   "mereka nanya ke lo — jawab singkat atau nanya balik",
+        "opinion":    "mereka share opini — lo bisa setuju, nuansi, atau tanya lebih lanjut",
+        "info":       "",
+    }.get(sentiment, "")
+
+    sentiment_line = f"\n\nKonteks: {sentiment_guidance}" if sentiment_guidance else ""
+
+    sys_prompt = f"""lo lagi ngobrol di Threads, ada orang yang balas komentar lo.
 lo mau nimbrung balik dengan santai — kayak orang nyambung ngobrol, bukan asisten.
 
 cara lo bales:
@@ -158,10 +198,9 @@ cara lo bales:
 
 contoh yang bagus:
 "nah bener tuh"
-"haha sama gue juga"
 "serius? gimana hasilnya?"
 "ini gue skip dulu, kayaknya ribet"
-"iya emg gitu sih kenyataannya\""""
+"iya emg gitu sih kenyataannya"{sentiment_line}"""
 
     user_prompt = (
         f"Konteks postingan asli: {original_caption[:150]}\n"
@@ -172,12 +211,9 @@ contoh yang bagus:
 
     try:
         resp = llm_router.generate(user_prompt, system_prompt=sys_prompt)
-        # Strip markdown kalau ada
-        import re
-        resp = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', resp).strip()
+        resp = _re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', resp).strip()
         resp = resp.lstrip('"> ').strip()
-        # Buang kalau ada link
-        if re.search(r'https?://\S+', resp):
+        if _re.search(r'https?://\S+', resp):
             return ""
         return resp[:200] if resp else ""
     except Exception as e:
@@ -192,46 +228,63 @@ def check_and_reply(session, our_username: str):
         print("[WATCHER] Belum ada post yang dikomentari dalam 24 jam terakhir.")
         return
 
-    print(f"[WATCHER] Mengecek {len(recent)} post yang baru-baru dikomentari…")
+    # Hanya proses entry yang punya comment_id (komentar yang di-track)
+    trackable = [e for e in recent if e.get("comment_id")]
+    if not trackable:
+        print("[WATCHER] Belum ada comment_id tersimpan — tunggu bot komentar berikutnya.")
+        return
+
+    print(f"[WATCHER] Mengecek {len(trackable)} komentar yang bisa di-track…")
     replied_count = 0
 
-    for entry in recent:
-        post_id     = entry["post_id"]
+    for entry in trackable:
+        comment_id  = entry["comment_id"]
         our_comment = entry["our_reply"]
         orig_cap    = entry["caption"]
 
-        items = fetch_thread_items(session, post_id)
+        items = fetch_comment_replies(session, comment_id)
         if not items:
             continue
 
         replies_to_us = find_replies_to_us(items, our_username)
         if not replies_to_us:
-            print(f"  [WATCHER] @{post_id[:8]}… — belum ada yang balas komentar kita")
+            print(f"  [WATCHER] comment {str(comment_id)[:8]}… — belum ada yang balas komentar kita")
             continue
 
         for r in replies_to_us:
-            rid = r["reply_id"]
+            rid        = r["reply_id"]
+            commenter  = r["commenter"]
+            reply_text = r["text"]
+
             if _already_replied(rid):
                 continue
 
-            print(f"  [WATCHER] @{r['commenter']} balas: {r['text'][:60]}…")
+            print(f"  [WATCHER] @{commenter} balas: {reply_text[:60]}…")
 
-            resp_text = generate_watcher_reply(r["text"], our_comment, orig_cap)
+            # Deteksi reply negatif → auto-blacklist, jangan balas
+            if _is_negative_reply(reply_text):
+                print(f"  [WATCHER] ⚠ Reply negatif terdeteksi dari @{commenter} — blacklist & skip")
+                _auto_blacklist(commenter)
+                _mark_replied(rid, "")  # catat sudah diproses supaya tidak re-trigger
+                continue
+
+            resp_text = generate_watcher_reply(reply_text, our_comment, orig_cap)
             if not resp_text:
                 print("  [WATCHER] Gagal generate balasan, skip.")
                 continue
 
             print(f"  [WATCHER] DRAF BALAS: {resp_text}")
 
-            # Jeda natural sebelum balas
             time.sleep(random.randint(3, 8))
 
-            ok = post_reply(session, rid, resp_text)
-            if ok:
+            new_id = post_reply(session, rid, resp_text)
+            if new_id is not None:
                 print("  [WATCHER] Berhasil membalas!")
                 _mark_replied(rid, resp_text)
                 stats_tracker.increment("comments_sent")
                 replied_count += 1
+                comment_memory.mark_engagement(our_comment, caption=orig_cap)
+                print(f"  [WATCHER] ⭐ Komentar '{our_comment[:40]}…' ditandai engaged")
             else:
                 print("  [WATCHER] Gagal membalas.")
 

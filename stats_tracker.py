@@ -3,7 +3,8 @@ import os
 import threading
 from datetime import datetime
 
-STATS_FILE = "stats.json"
+_DIR = os.path.dirname(os.path.abspath(__file__))
+STATS_FILE = os.path.join(_DIR, "stats.json")
 _lock = threading.Lock()
 
 DEFAULT_STATS = {
@@ -14,6 +15,9 @@ DEFAULT_STATS = {
     "post_failures": 0,
     "llm_errors": 0,
     "watchdog_restarts": 0,
+    "trend_posts_found": 0,
+    "trend_posts_selected": 0,
+    "trend_fallbacks": 0,
     "last_comment_time": "",
     "last_post_time": "",
     "last_error": "",
@@ -62,15 +66,15 @@ def increment(key: str):
         stats = _load_stats()
         if key in stats:
             stats[key] += 1
-            
+
             # Auto-update corresponding timestamps
             time_str = get_current_time_str()
             if key == "comments_sent":
                 stats["last_comment_time"] = time_str
             elif key == "posts_created":
                 stats["last_post_time"] = time_str
-                
-        _save_stats(stats)
+
+            _save_stats(stats)
 
 def log_error(error_msg: str):
     with _lock:

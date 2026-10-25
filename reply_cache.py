@@ -8,7 +8,8 @@ import os
 import threading
 import time
 
-CACHE_FILE = os.getenv("REPLY_CACHE_FILE", "reply_cache.json")
+_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_FILE = os.getenv("REPLY_CACHE_FILE", os.path.join(_DIR, "reply_cache.json"))
 TTL_SECONDS = 86400
 _lock = threading.Lock()
 
@@ -45,26 +46,55 @@ def check_cache(prompt: str):
         return entry.get("reply") if entry else None
 
 
-def save_to_cache(prompt: str, reply: str, post_id: str = ""):
+def save_to_cache(prompt: str, reply: str, post_id: str = "", comment_id: str = ""):
     with _lock:
         cache = _load()
-        cache[prompt] = {"reply": reply, "timestamp": time.time(), "post_id": post_id}
+        cache[prompt] = {
+            "reply":      reply,
+            "timestamp":  time.time(),
+            "post_id":    post_id,
+            "comment_id": comment_id,
+        }
         _save(cache)
 
 
-def get_recent_post_ids(max_age_hours: float = 24) -> list[dict]:
-    """Kembalikan list {post_id, caption, reply} yang dikomentari dalam N jam terakhir."""
+def get_activity_by_hour() -> dict:
+    """Hitung berapa komentar per jam dari 7 hari terakhir (hanya entry dengan post_id)."""
     with _lock:
         cache = _load()
-        now   = time.time()
+    now = time.time()
+    counts = {h: 0 for h in range(24)}
+    for v in cache.values():
+        ts = v.get("timestamp", 0)
+        if v.get("post_id") and (now - ts) < 86400 * 7:
+            h = int(time.strftime("%H", time.localtime(ts)))
+            counts[h] += 1
+    return counts
+
+
+def get_peak_hours(top_n: int = 5) -> set:
+    """Kembalikan set jam dengan aktivitas komentar tertinggi (dari 7 hari terakhir)."""
+    counts = get_activity_by_hour()
+    if not any(counts.values()):
+        return set()
+    sorted_hours = sorted(counts, key=lambda h: counts[h], reverse=True)
+    return {h for h in sorted_hours[:top_n] if counts[h] > 0}
+
+
+def get_recent_post_ids(max_age_hours: float = 24) -> list[dict]:
+    """Kembalikan list {post_id, comment_id, caption, our_reply} yang dikomentari dalam N jam terakhir."""
+    with _lock:
+        cache = _load()
+        now    = time.time()
         cutoff = now - max_age_hours * 3600
         result = []
         for caption, v in cache.items():
             if v.get("timestamp", 0) >= cutoff and v.get("post_id"):
                 result.append({
-                    "post_id":   v["post_id"],
-                    "caption":   caption,
-                    "our_reply": v.get("reply", ""),
-                    "ts":        v["timestamp"],
+                    "post_id":    v["post_id"],
+                    "comment_id": v.get("comment_id", ""),
+                    "caption":    caption,
+                    "our_reply":  v.get("reply", ""),
+                    "ts":         v["timestamp"],
                 })
         return sorted(result, key=lambda x: x["ts"], reverse=True)

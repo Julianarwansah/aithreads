@@ -33,6 +33,9 @@ from auto_commenter import (
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
+_DIR              = os.path.dirname(os.path.abspath(__file__))
+_LAST_POST_FILE   = os.path.join(_DIR, "poster_last_post.json")
+
 POST_ENDPOINT = "https://www.threads.com/api/v1/media/configure_text_only_post/"
 
 BASE_HEADERS = {
@@ -138,6 +141,16 @@ def generate_thread_content(session) -> str:
     # 1. Scan tren dulu
     trend_posts   = scan_trending_it_ai(session)
     trend_summary = _build_trend_summary(trend_posts)
+    # Simpan hasil scan ke cache agar UI bisa baca
+    try:
+        from pathlib import Path
+        tc = os.path.join(_DIR, "trending_cache.json")
+        Path(tc).write_text(
+            json.dumps({"ts": time.time(), "posts": trend_posts[:6]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     # 2. Pilih topik referensi: dari tren kalau ada, atau random dari list
     if trend_posts:
@@ -243,6 +256,25 @@ def post_thread(session, text: str) -> bool:
         return False
 
 
+def _read_last_post_time() -> float:
+    """Baca timestamp postingan terakhir dari file (0 kalau belum pernah)."""
+    try:
+        from pathlib import Path
+        if Path(_LAST_POST_FILE).exists():
+            data = json.loads(Path(_LAST_POST_FILE).read_text(encoding="utf-8"))
+            return float(data.get("ts", 0))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _write_last_post_time():
+    from pathlib import Path
+    Path(_LAST_POST_FILE).write_text(
+        json.dumps({"ts": time.time()}, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def is_active_hours() -> bool:
     cfg   = config_loader.load()
     h     = datetime.now().hour
@@ -271,6 +303,16 @@ def main():
             cfg   = config_loader.load()
             start = int(cfg.get("active_start_hour", 7))
             end   = int(cfg.get("active_end_hour",   23))
+            hours = float(cfg.get("poster_interval_hours", 48))
+
+            # Cek interval sejak postingan terakhir — tahan double-post saat restart
+            last_ts    = _read_last_post_time()
+            elapsed_hr = (time.time() - last_ts) / 3600
+            if last_ts > 0 and elapsed_hr < hours:
+                remaining_hr = hours - elapsed_hr
+                print(f"[INFO] Belum saatnya posting (sisa {remaining_hr:.1f} jam dari interval {hours:.0f} jam).")
+                time.sleep(min(3600, int(remaining_hr * 3600)))
+                continue
 
             if not is_active_hours():
                 print(f"[SCHEDULE] Di luar jam aktif ({start:02d}:00–{end:02d}:00), tidur 30 menit…")
@@ -295,14 +337,13 @@ def main():
             if ok:
                 print("  >> Berhasil memposting!")
                 stats_tracker.increment("posts_created")
+                _write_last_post_time()
             else:
                 print("  >> Gagal posting.")
                 stats_tracker.increment("post_failures")
 
-            hours = float(cfg.get("poster_interval_hours", 48))
-            delay = int(hours * 3600)
             print(f"\n[INFO] Poster tidur {hours:.0f} jam hingga postingan berikutnya…")
-            time.sleep(delay)
+            time.sleep(int(hours * 3600))
 
         except Exception as e:
             stats_tracker.log_error(str(e))

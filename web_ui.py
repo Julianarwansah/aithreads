@@ -2,11 +2,11 @@
 web_ui.py -- ThreadScope Dashboard v3 (pure stdlib).
 Jalankan: python3 web_ui.py  →  http://localhost:5000
 """
-import json, os, signal, subprocess, sys, time, threading
-from datetime import datetime
+import csv, io, json, os, signal, subprocess, sys, time, threading
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -42,10 +42,12 @@ def _launch(script, logfile, pidfile):
     if _is_alive(pidfile):
         return {"ok": False, "msg": "Sudah berjalan"}
     open(logfile, "w").close()
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     with open(logfile, "ab") as lf:
         proc = subprocess.Popen(
-            [sys.executable, script],
+            [sys.executable, "-u", script],
             stdout=lf, stderr=subprocess.STDOUT, cwd=_DIR,
+            env=env,
         )
     Path(pidfile).write_text(str(proc.pid))
     return {"ok": True, "pid": proc.pid}
@@ -84,7 +86,7 @@ def _watchdog_loop():
         if cfg.get("poster_enabled") and Path(POSTER_PID).exists() and not _is_alive(POSTER_PID):
             Path(POSTER_PID).unlink(missing_ok=True)
             _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID)
-        # Restart watcher if enabled and crashed
+        # Restart watcher only if it was previously started (PID file exists) but crashed
         if cfg.get("auto_reply_enabled") and Path(WATCHER_PID).exists() and not _is_alive(WATCHER_PID):
             Path(WATCHER_PID).unlink(missing_ok=True)
             _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID)
@@ -142,8 +144,34 @@ def _get_comments():
         cache = json.loads(Path(cp).read_text(encoding="utf-8")) if os.path.exists(cp) else {}
     except Exception:
         cache = {}
-    items = [{"caption": k, "reply": v.get("reply",""), "ts": v.get("timestamp",0)}
-             for k, v in cache.items()]
+    # Enrich from comment_memory: engaged, style, topic_bucket
+    mp = os.path.join(_DIR, "comment_memory.json")
+    mem_map: dict = {}
+    try:
+        mem = json.loads(Path(mp).read_text(encoding="utf-8")) if os.path.exists(mp) else []
+        for e in mem:
+            key = e.get("reply", "")[:60]
+            mem_map[key] = {
+                "engaged":      bool(e.get("engaged")),
+                "style":        e.get("style", ""),
+                "topic_bucket": e.get("topic_bucket", ""),
+            }
+    except Exception:
+        pass
+    items = []
+    for k, v in cache.items():
+        reply = v.get("reply", "")
+        info  = mem_map.get(reply[:60], {})
+        items.append({
+            "caption":    k,
+            "reply":      reply,
+            "ts":         v.get("timestamp", 0),
+            "post_id":    v.get("post_id", ""),
+            "comment_id": v.get("comment_id", ""),
+            "engaged":    info.get("engaged", False),
+            "style":      info.get("style", ""),
+            "topic":      info.get("topic_bucket", ""),
+        })
     return sorted(items, key=lambda x: x["ts"], reverse=True)
 
 def _get_activity():
@@ -162,6 +190,82 @@ def _get_activity():
             if key in buckets:
                 buckets[key] += 1
     return [{"hour": k, "count": v} for k, v in buckets.items()]
+
+def _get_trending_cache() -> dict:
+    """Baca hasil scan trending terakhir dari threads_poster."""
+    tc = os.path.join(_DIR, "trending_cache.json")
+    try:
+        if os.path.exists(tc):
+            return json.loads(Path(tc).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"ts": 0, "posts": []}
+
+
+def _get_daily_comments(days: int = 7) -> list:
+    """Hitung komentar yang dikirim per hari selama N hari terakhir."""
+    import reply_cache as rc
+    from collections import defaultdict
+    cached      = rc.get_recent_post_ids(max_age_hours=24 * days)
+    by_date: dict = defaultdict(int)
+    for e in cached:
+        if e.get("ts"):
+            d = datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d")
+            by_date[d] += 1
+    import datetime as _dt
+    today   = _dt.date.today()
+    result  = []
+    for i in range(days - 1, -1, -1):
+        day = (today - _dt.timedelta(days=i)).isoformat()
+        result.append({"date": day, "count": by_date.get(day, 0)})
+    return result
+
+
+def _get_watcher_stats() -> dict:
+    """Baca statistik Reply Watcher dari replied_cache.json + watcher_output.log."""
+    import reply_cache as rc
+    recent    = rc.get_recent_post_ids(max_age_hours=24)
+    trackable = [e for e in recent if e.get("comment_id")]
+
+    # replied_cache: {reply_id: {ts, text}}
+    rp = os.path.join(_DIR, "replied_cache.json")
+    replied: dict = {}
+    try:
+        replied = json.loads(Path(rp).read_text(encoding="utf-8")) if os.path.exists(rp) else {}
+    except Exception:
+        pass
+
+    replies_received = 0
+    auto_blacklisted = 0
+    last_cycle = ""
+    try:
+        with open(WATCHER_LOG, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "[WATCHER]" in line and "balas:" in line and "@" in line:
+                    replies_received += 1
+                if "blacklist & skip" in line or "auto-blacklist" in line.lower():
+                    auto_blacklisted += 1
+                if "Tidur" in line:
+                    last_cycle = line.strip()
+    except Exception:
+        pass
+
+    replied_list = sorted(
+        [{"reply_id": rid, "text": v.get("text", ""), "ts": v.get("ts", 0)}
+         for rid, v in replied.items() if v.get("text")],
+        key=lambda x: x["ts"], reverse=True
+    )[:15]
+
+    return {
+        "trackable":        len(trackable),
+        "trackable_list":   trackable[:10],
+        "replies_received": replies_received,
+        "replies_sent":     len(replied_list),
+        "auto_blacklisted": auto_blacklisted,
+        "last_cycle":       last_cycle,
+        "replied_list":     replied_list,
+    }
+
 
 def _get_poster_posts():
     """Ambil riwayat postingan dari poster_output.log."""
@@ -283,7 +387,7 @@ nav{width:196px;background:var(--surf);border-right:1px solid var(--brd);padding
 .search-row input{flex:1;background:var(--surf);border:1px solid var(--brd);border-radius:6px;padding:7px 12px;color:var(--txt);font-size:13px;outline:none}
 .search-row input:focus{border-color:var(--blue)}
 .cmt-grid{display:flex;flex-direction:column;gap:8px}
-.cmt{background:var(--surf);border:1px solid var(--brd);border-radius:8px;padding:11px 13px}
+.cmt{background:var(--surf);border:1px solid var(--brd);border-radius:8px;padding:11px 13px}.cmt.eng{border-color:rgba(250,204,21,.35);background:rgba(250,204,21,.04)}
 .cmt .cap{font-size:11px;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between;gap:8px}
 .cmt .cap span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmt .rep{font-size:13px;line-height:1.5}
@@ -349,6 +453,7 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   <div class="logo">Thread<em>Scope</em></div>
   <div class="badge off" id="top-badge"><div class="dot off" id="top-dot"></div><span id="top-txt">Stopped</span></div>
   <div class="badge off" id="poster-badge" style="display:none"><div class="dot off" id="poster-dot"></div><span id="poster-txt">Poster</span></div>
+  <div id="session-warn" style="display:none;background:#2d1b1b;border:1px solid var(--red);border-radius:6px;padding:3px 12px;font-size:11px;color:var(--red);cursor:pointer" onclick="goPage('log')">⚠ Session mungkin expired — klik untuk lihat log</div>
   <div class="spacer"></div>
   <div class="topbar-right">
     <div class="topbar-schedule" id="sched-badge">⏰ —</div>
@@ -371,8 +476,14 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   <button class="nav-item" onclick="goPage('poster')" id="nav-poster">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>Poster
   </button>
+  <button class="nav-item" onclick="goPage('watcher')" id="nav-watcher">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Watcher
+  </button>
   <button class="nav-item" onclick="goPage('growth')" id="nav-growth">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Growth
+  </button>
+  <button class="nav-item" onclick="goPage('analytics')" id="nav-analytics">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Analitik
   </button>
   <button class="nav-item" onclick="goPage('bl')" id="nav-bl">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Blacklist
@@ -425,6 +536,7 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="row"><span class="k">Jam Aktif</span><span class="v" id="d-sched">—</span></div>
       <div class="row"><span class="k">Watchdog</span><span class="v" id="d-wd">—</span></div>
       <div class="row"><span class="k">Komentar Terakhir</span><span class="v" id="d-lcmt">—</span></div>
+      <div class="row"><span class="k">Komentar Berikutnya</span><span class="v" id="d-next" style="color:var(--teal)">—</span></div>
       <div class="row"><span class="k">Watchdog Restart</span><span class="v" id="d-wdr">0×</span></div>
     </div>
   </div>
@@ -451,6 +563,11 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 <!-- ════════════════════════════ LIVE LOG ════════════════════════════════════ -->
 <div class="page" id="page-log">
   <div class="term-toolbar">
+    <div style="display:flex;gap:4px;margin-right:8px;border-right:1px solid var(--brd);padding-right:8px">
+      <div class="fchip src-chip on" onclick="switchLogSource('bot',this)">Bot</div>
+      <div class="fchip src-chip"    onclick="switchLogSource('watcher',this)">Watcher</div>
+      <div class="fchip src-chip"    onclick="switchLogSource('poster',this)">Poster</div>
+    </div>
     <div id="log-chips" style="display:flex;gap:4px">
       <div class="fchip on"  data-f="all"   onclick="setFilt('all',this)">Semua</div>
       <div class="fchip"     data-f="info"  onclick="setFilt('info',this)">Info</div>
@@ -471,7 +588,9 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 <div class="page-body">
   <div class="search-row">
     <input type="text" id="q" placeholder="Cari komentar atau caption…" oninput="filterCmts()">
+    <button class="btn btn-ghost sm" id="eng-flt" onclick="toggleEngFilter()">⭐ Engaged</button>
     <button class="btn btn-ghost" onclick="loadComments()">↻</button>
+    <a class="btn btn-ghost sm" href="/api/comments/export" download="threadscope_comments.csv">⬇ Export CSV</a>
     <button class="btn btn-danger sm" onclick="clearCache()">Hapus Cache</button>
   </div>
   <div style="font-size:11px;color:var(--muted)" id="cmt-info">—</div>
@@ -506,6 +625,11 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     <div class="row"><span class="k">Jadwal</span><span class="v" id="p-sched">—</span></div>
   </div>
 
+  <div class="card">
+    <div class="card-hdr">Inspirasi Tren Sekarang <span id="trend-age" style="font-weight:400;font-size:10px;color:var(--muted);text-transform:none;letter-spacing:0;margin-left:6px"></span> <a onclick="loadTrending()">↻</a></div>
+    <div id="trend-list"><div style="color:var(--muted);font-size:12px">Data tren muncul setelah Poster pertama kali dijalankan.</div></div>
+  </div>
+
 </div></div>
 
 <!-- ════════════════════════════ PENGATURAN ══════════════════════════════════ -->
@@ -538,6 +662,11 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
         <label>Batas Umur Post <span class="rv" id="rv-age">5</span> jam</label>
         <input type="range" class="fi" id="s-age" min="1" max="24" value="5" oninput="rv('rv-age',this.value)">
         <div class="hint">Postingan lebih lama dari ini akan dilewati.</div>
+      </div>
+      <div class="fg">
+        <label>Persona Bot</label>
+        <textarea class="fi" id="s-persona" rows="5" style="resize:vertical;line-height:1.55;font-size:12px"></textarea>
+        <div class="hint">Karakter yang dipakai AI saat menulis komentar. Deskripsikan background, gaya bahasa, dan sudut pandang bot.</div>
       </div>
       <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm1"></span></div>
     </div>
@@ -683,6 +812,14 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
         </div>
         <div class="hint">Cache komentar dipakai untuk menghindari jawaban duplikat. Reset statistik menghapus stats.json.</div>
       </div>
+      <div class="fg" style="margin-top:18px">
+        <label>Backup &amp; Restore Pengaturan</label>
+        <div class="btn-row">
+          <a class="btn btn-ghost sm" href="/api/settings/export" download="threadscope_settings.json">⬇ Export JSON</a>
+          <label class="btn btn-ghost sm" style="cursor:pointer">⬆ Import JSON<input type="file" id="import-file" accept=".json" style="display:none" onchange="importSettings(this)"></label>
+        </div>
+        <div class="hint">Export untuk backup. Import untuk restore atau pindah mesin — pengaturan akan di-merge ke yang ada.</div>
+      </div>
       <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm7"></span></div>
     </div>
 
@@ -715,6 +852,81 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     <div id="g-table" style="font-size:12px;max-height:300px;overflow-y:auto">
       <div style="color:var(--muted)">Memuat…</div>
     </div>
+    <div style="font-size:10px;color:var(--muted);margin-top:6px">Kolom Komentar menunjukkan berapa komentar dikirim hari itu (dari cache 30 hari).</div>
+  </div>
+
+</div></div>
+
+<!-- ════════════════════════════ WATCHER ═════════════════════════════════════ -->
+<div class="page" id="page-watcher">
+<div class="page-body">
+
+  <div class="btn-row">
+    <button class="btn btn-green" id="wbtn2-start" onclick="startWatcher()" style="background:var(--teal)">▶ Jalankan Watcher</button>
+    <button class="btn btn-red"   id="wbtn2-stop"  onclick="stopWatcher()" disabled>■ Hentikan Watcher</button>
+    <button class="btn btn-ghost" onclick="loadWatcher()">↻ Refresh</button>
+  </div>
+
+  <div class="grid4">
+    <div class="stat-card"><div class="lbl">Komentar Dipantau</div><div class="num b" id="w-trackable">—</div><div class="sub">dalam 24 jam terakhir</div></div>
+    <div class="stat-card"><div class="lbl">Balasan Diterima</div><div class="num g" id="w-received">—</div><div class="sub">total dari log</div></div>
+    <div class="stat-card"><div class="lbl">Balasan Terkirim</div><div class="num p" id="w-sent">—</div><div class="sub">berhasil dibalas bot</div></div>
+    <div class="stat-card"><div class="lbl">Auto-Blacklist</div><div class="num r" id="w-bl">—</div><div class="sub">reply negatif terdeteksi</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Komentar Sedang Dipantau <span id="w-last-cycle" style="font-weight:400;font-size:10px;color:var(--muted);text-transform:none;letter-spacing:0;margin-left:6px"></span></div>
+    <div id="w-trackable-list"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Riwayat Balasan Terkirim</div>
+    <div id="w-replied-list"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+  </div>
+
+</div></div>
+
+<!-- ════════════════════════════ ANALITIK ════════════════════════════════════ -->
+<div class="page" id="page-analytics">
+<div class="page-body">
+
+  <div class="grid4">
+    <div class="stat-card"><div class="lbl">Total Komentar</div><div class="num p" id="an-total">—</div><div class="sub">sejak mulai bot</div></div>
+    <div class="stat-card"><div class="lbl">Komentar Engaged</div><div class="num g" id="an-engaged">—</div><div class="sub">dapat balasan</div></div>
+    <div class="stat-card"><div class="lbl">Engagement Rate</div><div class="num b" id="an-rate">—</div><div class="sub">keseluruhan</div></div>
+    <div class="stat-card"><div class="lbl">Gaya Terbaik</div><div class="num" style="font-size:18px;color:var(--purple)" id="an-best">—</div><div class="sub" id="an-best-sub">—</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="card-hdr">Distribusi Gaya Komentar <a onclick="loadAnalytics()">↻</a></div>
+      <div id="an-style-bars"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-hdr">Engagement per Tipe Postingan</div>
+      <div id="an-sent-bars"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Komentar per Hari — 7 Hari Terakhir</div>
+    <div id="an-daily-chart"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Jam Aktif — 7 Hari Terakhir <a onclick="loadAnalytics()">↻</a></div>
+    <div id="an-hour-chart"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+    <div style="font-size:10px;color:var(--muted);margin-top:6px">Hijau = jam peak · batang = jumlah komentar dikirim</div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Panjang Komentar vs Engagement</div>
+    <div id="an-length-stats"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Komentar yang Dapat Balasan ⭐</div>
+    <div id="an-engaged-list"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
   </div>
 
 </div></div>
@@ -825,6 +1037,10 @@ async function pollStatus(){
     tb.className='badge '+(rb?'on':'off');
     document.getElementById('top-txt').textContent=rb?'Running':'Stopped';
 
+    // session warning banner
+    const sw=document.getElementById('session-warn');
+    if(sw) sw.style.display=d.session_warning?'flex':'none';
+
     const pb=document.getElementById('poster-badge');
     pb.style.display=rp?'flex':'none';
     document.getElementById('poster-dot').className='dot '+(rp?'on':'off');
@@ -857,6 +1073,8 @@ async function pollStatus(){
     const rw=d.watcher_running;
     const wbS=document.getElementById('wbtn-start'),wbT=document.getElementById('wbtn-stop');
     if(wbS)wbS.disabled=rw; if(wbT)wbT.disabled=!rw;
+    const wb2S=document.getElementById('wbtn2-start'),wb2T=document.getElementById('wbtn2-stop');
+    if(wb2S)wb2S.disabled=rw; if(wb2T)wb2T.disabled=!rw;
     const bEl=document.getElementById('d-bot');bEl.textContent=rb?'Running':'Stopped';bEl.style.color=rb?'var(--green)':'var(--red)';
     const pEl=document.getElementById('d-poster');pEl.textContent=rp?'Running':'Stopped';pEl.style.color=rp?'var(--purple)':'var(--muted)';
     const wEl=document.getElementById('d-watcher');if(wEl){wEl.textContent=rw?'Running':'Stopped';wEl.style.color=rw?'var(--teal)':'var(--muted)';}
@@ -864,6 +1082,8 @@ async function pollStatus(){
     document.getElementById('d-sched').textContent=`${String(sh).padStart(2,'0')}:00–${String(eh).padStart(2,'0')}:00 ${inHours?'✓ Aktif':'(di luar jam)'}`;
     document.getElementById('d-wd').textContent=wdOn?'Aktif — auto-restart ON':'Nonaktif';
     document.getElementById('d-lcmt').textContent=s.last_comment_time||'—';
+    const nextEl=document.getElementById('d-next');
+    if(nextEl)nextEl.textContent=d.est_next||(rb?'menghitung…':'—');
     document.getElementById('d-wdr').textContent=(s.watchdog_restart||0)+'×';
 
     // filter info
@@ -927,7 +1147,7 @@ function addLine(text){
 }
 function setFilt(f,el){
   logFilt=f;
-  document.querySelectorAll('.fchip').forEach(c=>c.classList.remove('on'));el.classList.add('on');
+  document.querySelectorAll('.fchip:not(.src-chip)').forEach(c=>c.classList.remove('on'));el.classList.add('on');
   term.querySelectorAll('.ln').forEach(ln=>{
     const c=[...ln.classList].find(x=>!['ln','hidden'].includes(x));
     ln.classList.toggle('hidden',f!=='all'&&c!==f);
@@ -936,10 +1156,22 @@ function setFilt(f,el){
 function clearTerm(){term.innerHTML=''}
 function toggleAS(){autoScroll=!autoScroll;document.getElementById('asbtn').textContent='↓ Auto '+(autoScroll?'ON':'OFF')}
 term.addEventListener('scroll',()=>{autoScroll=term.scrollTop+term.clientHeight>=term.scrollHeight-40;document.getElementById('asbtn').textContent='↓ Auto '+(autoScroll?'ON':'OFF')})
-function connectSSE(){
-  const es=new EventSource('/api/logs');
-  es.onmessage=e=>addLine(e.data);
-  es.onerror=()=>{addLine('[UI] Koneksi terputus, menyambung…');es.close();setTimeout(connectSSE,3000)};
+let _logSource='bot', _sseConn=null;
+function connectSSE(source){
+  source=source||_logSource;
+  if(_sseConn){_sseConn.close();_sseConn=null;}
+  _sseConn=new EventSource('/api/logs?source='+source);
+  _sseConn.onmessage=e=>addLine(e.data);
+  _sseConn.onerror=()=>{addLine('[UI] Koneksi terputus, menyambung…');_sseConn.close();setTimeout(()=>connectSSE(_logSource),3000)};
+}
+function switchLogSource(src,el){
+  _logSource=src;
+  logFilt='all';
+  clearTerm();
+  document.querySelectorAll('.src-chip').forEach(c=>c.classList.remove('on'));
+  el.classList.add('on');
+  document.querySelectorAll('.fchip').forEach(c=>{c.classList.toggle('on',c.dataset.f==='all');});
+  connectSSE(src);
 }
 
 // ── comments ──────────────────────────────────────────────────────────────
@@ -960,19 +1192,32 @@ async function loadComments(){
       </div>`).join('');
   }catch(e){}
 }
+let showEngOnly=false;
 function renderCmts(items){
   const el=document.getElementById('cmt-list');
-  document.getElementById('cmt-info').textContent=items.length+' komentar';
+  const engCount=allCmts.filter(i=>i.engaged).length;
+  document.getElementById('cmt-info').textContent=items.length+' komentar'+(engCount?' · '+engCount+' ⭐':'');
   if(!items.length){el.innerHTML='<div style="color:var(--muted)">Kosong.</div>';return}
   el.innerHTML=items.map(i=>`
-    <div class="cmt">
-      <div class="cap"><span>📌 ${i.caption.replace(/</g,'&lt;').substring(0,90)}</span><span style="flex-shrink:0">${fmtTs(i.ts)}</span></div>
+    <div class="cmt${i.engaged?' eng':''}">
+      <div class="cap"><span>${i.engaged?'⭐ ':''}📌 ${i.caption.replace(/</g,'&lt;').substring(0,90)}</span><span style="flex-shrink:0">${fmtTs(i.ts)}</span></div>
       <div class="rep">${i.reply.replace(/</g,'&lt;')}</div>
+      ${(i.style||i.topic)?`<div style="margin-top:5px;display:flex;gap:4px">${i.style?`<span class="kw" style="color:var(--purple)">${i.style}</span>`:''}${i.topic?`<span class="kw" style="color:var(--muted)">${i.topic}</span>`:''}</div>`:''}
     </div>`).join('');
 }
 function filterCmts(){
   const q=document.getElementById('q').value.toLowerCase();
-  renderCmts(q?allCmts.filter(i=>i.caption.toLowerCase().includes(q)||i.reply.toLowerCase().includes(q)):allCmts);
+  let items=q?allCmts.filter(i=>i.caption.toLowerCase().includes(q)||i.reply.toLowerCase().includes(q)):allCmts;
+  if(showEngOnly)items=items.filter(i=>i.engaged);
+  renderCmts(items);
+}
+function toggleEngFilter(){
+  showEngOnly=!showEngOnly;
+  const btn=document.getElementById('eng-flt');
+  btn.style.background=showEngOnly?'rgba(250,204,21,.18)':'';
+  btn.style.color=showEngOnly?'var(--yellow)':'';
+  btn.textContent=showEngOnly?'⭐ Engaged ×':'⭐ Engaged';
+  filterCmts();
 }
 async function clearCache(){
   if(!confirm('Hapus semua cache komentar?'))return;
@@ -994,6 +1239,7 @@ async function loadPosterPosts(){
     el.innerHTML=posts.reverse().map(p=>`
       <div class="post-item"><div class="txt">${p.text.replace(/</g,'&lt;')}</div></div>`).join('');
   }catch(e){}
+  loadTrending();
 }
 
 // ── settings ──────────────────────────────────────────────────────────────
@@ -1020,6 +1266,7 @@ async function loadSettings(){
     extraIt=[...(s.it_ai_keywords_extra||[])];
     extraLk=[...(s.loker_keywords_extra||[])];
     renderKws();
+    document.getElementById('s-persona').value=s.bot_persona||'';
   }catch(e){}
 }
 function setSlider(sid,rvid,val,def,fmt=v=>v){
@@ -1068,6 +1315,7 @@ async function saveAll(){
     watchdog_enabled:          document.getElementById('s-wd').value==='true',
     it_ai_keywords_extra:  extraIt,
     loker_keywords_extra:  extraLk,
+    bot_persona:           document.getElementById('s-persona').value.trim()||undefined,
   };
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1110,17 +1358,221 @@ async function loadGrowth(){
     document.getElementById('g-xlbl-l').textContent=hist[0]?.date||'—';
     document.getElementById('g-xlbl-r').textContent=hist[hist.length-1]?.date||'—';
 
-    // table
+    // table with comments correlation
     const tbl=document.getElementById('g-table');
     if(!hist.length){tbl.innerHTML='<div style="color:var(--muted)">Belum ada data.</div>';return;}
     tbl.innerHTML='<table style="width:100%;border-collapse:collapse">'
-      +'<tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px"><td style="padding:4px 8px">Tanggal</td><td style="padding:4px 8px;text-align:right">Followers</td><td style="padding:4px 8px;text-align:right">Following</td><td style="padding:4px 8px;text-align:right">±</td></tr>'
+      +'<tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px"><td style="padding:4px 8px">Tanggal</td><td style="padding:4px 8px;text-align:right">Followers</td><td style="padding:4px 8px;text-align:right">±</td><td style="padding:4px 8px;text-align:right">Komentar</td></tr>'
       +[...hist].reverse().map((h,i,a)=>{
         const prev=a[i+1];
-        const d=prev?(h.followers-prev.followers):0;
-        const dc=d>0?'var(--green)':d<0?'var(--red)':'var(--muted)';
-        return `<tr style="border-top:1px solid var(--brd2)"><td style="padding:5px 8px;font-size:12px">${h.date}</td><td style="padding:5px 8px;text-align:right;font-weight:600">${h.followers}</td><td style="padding:5px 8px;text-align:right;color:var(--muted)">${h.following}</td><td style="padding:5px 8px;text-align:right;color:${dc};font-weight:600">${d>0?'+':''}${d||'—'}</td></tr>`;
+        const df=prev?(h.followers-prev.followers):0;
+        const dc=df>0?'var(--green)':df<0?'var(--red)':'var(--muted)';
+        const cmtCol=h.comments>0?`<span style="color:var(--purple)">${h.comments}</span>`:'<span style="color:var(--muted2)">—</span>';
+        return `<tr style="border-top:1px solid var(--brd2)"><td style="padding:5px 8px;font-size:12px">${h.date}</td><td style="padding:5px 8px;text-align:right;font-weight:600">${h.followers}</td><td style="padding:5px 8px;text-align:right;color:${dc};font-weight:600">${df>0?'+':''}${df||'—'}</td><td style="padding:5px 8px;text-align:right">${cmtCol}</td></tr>`;
       }).join('')+'</table>';
+  }catch(e){}
+}
+
+// ── poster trending ───────────────────────────────────────────────────────
+async function loadTrending(){
+  try{
+    const d=await(await fetch('/api/poster/trending')).json();
+    const el=document.getElementById('trend-list');
+    const ageEl=document.getElementById('trend-age');
+    if(d.ts&&ageEl){
+      const mins=Math.round((Date.now()/1000-d.ts)/60);
+      ageEl.textContent=mins<60?`${mins} mnt lalu`:`${Math.round(mins/60)} jam lalu`;
+    }
+    if(!d.posts||!d.posts.length){
+      el.innerHTML='<div style="color:var(--muted);font-size:12px">Data tren muncul setelah Poster pertama kali dijalankan.</div>';return;
+    }
+    el.innerHTML=d.posts.map((p,i)=>`
+      <div style="padding:8px 0;border-bottom:1px solid var(--brd2);display:flex;gap:10px;align-items:flex-start">
+        <span style="color:var(--muted2);font-size:11px;min-width:14px">${i+1}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:2px">@${p.username}</div>
+          <div style="font-size:13px;line-height:1.4">${p.caption.replace(/</g,'&lt;').substring(0,120)}${p.caption.length>120?'…':''}</div>
+          <div style="font-size:10px;color:var(--muted2);margin-top:3px">👍 ${p.likes} · 💬 ${p.replies} · engagement ${p.engagement}</div>
+        </div>
+      </div>`).join('');
+  }catch(e){}
+}
+
+// ── settings import ───────────────────────────────────────────────────────
+async function importSettings(input){
+  const f=input.files[0];if(!f)return;
+  try{
+    const text=await f.text();
+    const data=JSON.parse(text);
+    const r=await fetch('/api/settings/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d=await r.json();
+    if(d.ok){toast('Pengaturan berhasil di-import!');loadSettings();}
+    else toast('Gagal import: '+(d.msg||'unknown'),'err');
+  }catch(e){toast('File tidak valid: '+e,'err');}
+  input.value='';
+}
+
+// ── watcher ───────────────────────────────────────────────────────────────
+async function loadWatcher(){
+  try{
+    const d=await(await fetch('/api/watcher/stats')).json();
+    document.getElementById('w-trackable').textContent=d.trackable??'—';
+    document.getElementById('w-received').textContent=d.replies_received??'—';
+    document.getElementById('w-sent').textContent=d.replies_sent??'—';
+    document.getElementById('w-bl').textContent=d.auto_blacklisted??'—';
+    if(d.last_cycle){
+      const lc=document.getElementById('w-last-cycle');
+      if(lc)lc.textContent=d.last_cycle.replace('[WATCHER]','').replace('[INFO]','').trim();
+    }
+    // trackable list
+    const tEl=document.getElementById('w-trackable-list');
+    const tl=d.trackable_list||[];
+    if(!tl.length){tEl.innerHTML='<div style="color:var(--muted);font-size:12px">Belum ada komentar yang bisa dipantau dalam 24 jam terakhir.</div>';}
+    else{tEl.innerHTML=tl.map(e=>`
+      <div style="padding:7px 0;border-bottom:1px solid var(--brd2)">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:2px">${e.caption.replace(/</g,'&lt;').substring(0,80)}…</div>
+        <div style="font-size:13px">${e.our_reply.replace(/</g,'&lt;')}</div>
+        <div style="font-size:10px;color:var(--muted2);margin-top:3px">comment_id: ${e.comment_id||'—'} · ${fmtTs(e.ts)}</div>
+      </div>`).join('');}
+    // replied list
+    const rEl=document.getElementById('w-replied-list');
+    const rl=d.replied_list||[];
+    if(!rl.length){rEl.innerHTML='<div style="color:var(--muted);font-size:12px">Belum ada balasan yang dikirim. Bot perlu komentar aktif yang mendapat balasan dulu.</div>';}
+    else{rEl.innerHTML=rl.map(r=>`
+      <div style="padding:7px 0;border-bottom:1px solid var(--brd2)">
+        <div style="font-size:13px;color:var(--teal)">${r.text.replace(/</g,'&lt;')}</div>
+        <div style="font-size:10px;color:var(--muted2);margin-top:2px">${fmtTs(r.ts)}</div>
+      </div>`).join('');}
+  }catch(e){}
+}
+
+// ── analytics ─────────────────────────────────────────────────────────────
+async function loadAnalytics(){
+  try{
+    const d=await(await fetch('/api/analytics')).json();
+
+    // stat cards
+    document.getElementById('an-total').textContent=d.total??0;
+    document.getElementById('an-engaged').textContent=d.engaged??0;
+    document.getElementById('an-rate').textContent=d.total?Math.round((d.rate||0)*100)+'%':'—';
+    const bs=d.best_style||'—';
+    document.getElementById('an-best').textContent=bs;
+    const bsr=d.by_style?.[bs]?.rate;
+    document.getElementById('an-best-sub').textContent=bsr!=null?Math.round(bsr*100)+'% engaged':'belum cukup data';
+
+    // style distribution bars
+    const styleEl=document.getElementById('an-style-bars');
+    const styles=['nanya','react','share','saran'];
+    const sLabel={'nanya':'Nanya','react':'React','share':'Share','saran':'Saran'};
+    const total=d.total||1;
+    styleEl.innerHTML=styles.map(s=>{
+      const sd=d.by_style?.[s]||{total:0,engaged:0,rate:0};
+      const pct=Math.round(sd.total/total*100);
+      const engPct=Math.round((sd.rate||0)*100);
+      const warn=s===d.overused_style?'<span style="color:var(--orange);font-size:10px;margin-left:4px">⚠ dominan</span>':'';
+      return `<div style="margin-bottom:13px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span>${sLabel[s]}${warn}</span>
+          <span style="color:var(--muted)">${sd.total}× · ${engPct}% engaged</span>
+        </div>
+        <div style="background:var(--surf3);border-radius:3px;height:8px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:var(--purple);border-radius:3px;transition:width .4s"></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // sentiment engagement bars
+    const sentEl=document.getElementById('an-sent-bars');
+    const sents=['frustrated','win','question','opinion','info'];
+    const sentLabel={'frustrated':'Frustrasi 😤','win':'Berhasil 🎉','question':'Pertanyaan ❓','opinion':'Opini 💬','info':'Info ℹ️'};
+    sentEl.innerHTML=sents.map(s=>{
+      const sd=d.by_sentiment?.[s]||{total:0,engaged:0,rate:0};
+      const engPct=Math.round((sd.rate||0)*100);
+      const col=engPct>=40?'var(--green)':engPct>=20?'var(--yellow)':'var(--muted)';
+      const isBest=s===d.best_sentiment;
+      return `<div style="margin-bottom:11px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+          <span>${sentLabel[s]}${isBest?' ⭐':''}</span>
+          <span style="color:var(--muted)">${sd.total} post · <span style="color:${col};font-weight:600">${engPct}%</span> engaged</span>
+        </div>
+        <div style="background:var(--surf3);border-radius:3px;height:6px;overflow:hidden">
+          <div style="height:100%;width:${engPct}%;background:${col};border-radius:3px;transition:width .4s"></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // daily comments chart
+    const dailyEl=document.getElementById('an-daily-chart');
+    const dc=d.daily_comments||[];
+    if(dc.length){
+      const maxD=Math.max(...dc.map(x=>x.count),1);
+      const dayHtml=dc.map(x=>{
+        const pct=Math.round(x.count/maxD*100);
+        const lbl=x.date.slice(5); // MM-DD
+        return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+          <div style="font-size:9px;color:var(--muted);min-height:12px">${x.count||''}</div>
+          <div style="background:var(--surf3);border-radius:2px 2px 0 0;height:50px;width:100%;display:flex;align-items:flex-end;overflow:hidden">
+            <div style="width:100%;height:${pct}%;background:var(--teal);border-radius:2px 2px 0 0;transition:height .4s;min-height:${x.count?2:0}px"></div>
+          </div>
+          <div style="font-size:9px;color:var(--muted2);margin-top:2px">${lbl}</div>
+        </div>`;
+      }).join('');
+      dailyEl.innerHTML=`<div style="display:flex;gap:3px;align-items:flex-end;padding:4px 0">${dayHtml}</div>`;
+    }
+
+    // length vs engagement stats
+    const lenEl=document.getElementById('an-length-stats');
+    const ls=d.length_stats||{};
+    if(ls.sample_engaged>0||ls.sample_not>0){
+      const diff=ls.avg_engaged-ls.avg_not_engaged;
+      const tip=diff>10?`Komentar lebih panjang (~${ls.avg_engaged} kar) cenderung lebih engaged.`:
+                diff<-10?`Komentar lebih pendek (~${ls.avg_engaged} kar) lebih banyak dapat balasan.`:
+                `Panjang komentar tidak terlalu berpengaruh (beda ${Math.abs(diff)} kar).`;
+      lenEl.innerHTML=`
+        <div style="display:flex;gap:16px;margin-bottom:12px">
+          <div style="text-align:center;flex:1">
+            <div style="font-size:22px;font-weight:700;color:var(--green)">${ls.avg_engaged||'—'}</div>
+            <div style="font-size:11px;color:var(--muted)">kar rata-rata engaged (n=${ls.sample_engaged})</div>
+          </div>
+          <div style="text-align:center;flex:1">
+            <div style="font-size:22px;font-weight:700;color:var(--muted)">${ls.avg_not_engaged||'—'}</div>
+            <div style="font-size:11px;color:var(--muted)">kar rata-rata tidak engaged (n=${ls.sample_not})</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--teal);padding:8px;background:var(--surf2);border-radius:6px">💡 ${tip}</div>`;
+    } else {
+      lenEl.innerHTML='<div style="color:var(--muted);font-size:12px">Butuh lebih banyak data engagement untuk analisis panjang komentar.</div>';
+    }
+
+    // peak hour chart
+    const hourEl=document.getElementById('an-hour-chart');
+    const byHour=d.activity_by_hour||{};
+    const peaks=new Set(d.peak_hours||[]);
+    const maxH=Math.max(...Object.values(byHour),1);
+    const hourHtml=Array.from({length:24},(_,h)=>{
+      const cnt=byHour[h]||0;
+      const pct=Math.round(cnt/maxH*100);
+      const isPeak=peaks.has(h);
+      const col=isPeak?'var(--green)':'var(--purple)';
+      return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+        <div style="font-size:8px;color:var(--muted);margin-bottom:1px;min-height:10px">${cnt||''}</div>
+        <div style="background:var(--surf3);border-radius:2px 2px 0 0;height:60px;width:100%;display:flex;align-items:flex-end;overflow:hidden">
+          <div style="width:100%;height:${pct}%;background:${col};border-radius:2px 2px 0 0;transition:height .4s;min-height:${cnt?2:0}px"></div>
+        </div>
+        <div style="font-size:8px;color:${isPeak?'var(--green)':'var(--muted2)'};margin-top:2px;font-weight:${isPeak?'600':'400'}">${String(h).padStart(2,'0')}</div>
+      </div>`;
+    }).join('');
+    hourEl.innerHTML=`<div style="display:flex;gap:2px;align-items:flex-end;padding:4px 0">${hourHtml}</div>`;
+
+    // engaged comments list
+    const engEl=document.getElementById('an-engaged-list');
+    const re=d.recent_engaged||[];
+    if(!re.length){engEl.innerHTML='<div style="color:var(--muted);font-size:12px">Belum ada komentar yang dapat balasan. Bot perlu lebih banyak interaksi dulu.</div>';return;}
+    engEl.innerHTML=re.map(e=>`
+      <div style="padding:9px 0;border-bottom:1px solid var(--brd2)">
+        <div style="font-size:13px;margin-bottom:4px">${e.reply.replace(/</g,'&lt;')} <span style="color:var(--yellow)">⭐</span></div>
+        <div style="font-size:10px;color:var(--muted2)">${e.style} · ${e.topic||'misc'} · ${fmtTs(e.ts)}</div>
+      </div>`).join('');
   }catch(e){}
 }
 
@@ -1161,8 +1613,7 @@ async function loadAutoBlacklist(){
   }catch(e){}
 }
 
-// ── override goPage to load data ─────────────────────────────────────────
-const _origGoPage=goPage;
+// ── page nav with data loading ───────────────────────────────────────────
 function goPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -1171,7 +1622,9 @@ function goPage(id){
   if(id==='cmt')loadComments();
   if(id==='set')loadSettings();
   if(id==='poster')loadPosterPosts();
+  if(id==='watcher')loadWatcher();
   if(id==='growth'){loadGrowth();}
+  if(id==='analytics'){loadAnalytics();}
   if(id==='bl'){loadBlacklist();loadAutoBlacklist();}
 }
 
@@ -1216,12 +1669,45 @@ class Handler(BaseHTTPRequestHandler):
             cfg = config_loader.load()
             stats = _get_stats()
             try:
-                sys.path.insert(0, _DIR)
+                if _DIR not in sys.path:
+                    sys.path.insert(0, _DIR)
                 import auto_commenter as ac
                 it_kw = len(ac._IT_AI_KEYWORDS) + len(cfg.get("it_ai_keywords_extra",[]))
                 lk_kw = len(ac._LOKER_KEYWORDS) + len(cfg.get("loker_keywords_extra",[]))
             except Exception:
                 it_kw = lk_kw = 0
+            # Session warning: error session dalam 2 jam terakhir
+            session_warning = False
+            last_err      = stats.get("last_error", "")
+            last_err_time = stats.get("last_error_time", "")
+            if any(kw in last_err.lower() for kw in ["session", "expired", "fetch fail"]):
+                if last_err_time:
+                    try:
+                        err_dt = datetime.strptime(last_err_time, "%Y-%m-%d %H:%M:%S")
+                        if (datetime.now() - err_dt).total_seconds() < 7200:
+                            session_warning = True
+                    except Exception:
+                        pass
+            # Estimasi komentar berikutnya
+            est_next = ""
+            if _is_alive(BOT_PID):
+                last_cmt = stats.get("last_comment_time", "")
+                if last_cmt:
+                    try:
+                        last_dt  = datetime.strptime(last_cmt, "%Y-%m-%d %H:%M:%S")
+                        d_min    = int(cfg.get("delay_min_minutes", 14))
+                        d_max    = int(cfg.get("delay_max_minutes", 17))
+                        next_min = last_dt + timedelta(minutes=d_min)
+                        next_max = last_dt + timedelta(minutes=d_max)
+                        now      = datetime.now()
+                        if next_max < now:
+                            est_next = "sedang dalam proses…"
+                        else:
+                            m_min = max(0, int((next_min - now).total_seconds() / 60))
+                            m_max = max(0, int((next_max - now).total_seconds() / 60))
+                            est_next = f"~{m_min}–{m_max} menit lagi"
+                    except Exception:
+                        pass
             self._json(200, {
                 "running":         _is_alive(BOT_PID),
                 "poster_running":  _is_alive(POSTER_PID),
@@ -1229,6 +1715,8 @@ class Handler(BaseHTTPRequestHandler):
                 "pid":             _read_pid(BOT_PID),
                 "poster_pid":      _read_pid(POSTER_PID),
                 "watcher_pid":     _read_pid(WATCHER_PID),
+                "session_warning": session_warning,
+                "est_next":        est_next,
                 "stats":           stats,
                 "filter_info": {
                     "it_kw":               it_kw,
@@ -1257,25 +1745,128 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _get_poster_posts())
 
         elif path == "/api/growth":
+            history = growth_tracker.get_history(30)
+            # Enrich history dengan jumlah komentar per hari
+            daily_cmts = {d["date"]: d["count"] for d in _get_daily_comments(30)}
+            for snap in history:
+                snap["comments"] = daily_cmts.get(snap.get("date",""), 0)
             self._json(200, {
-                "history": growth_tracker.get_history(30),
+                "history": history,
                 "latest":  growth_tracker.get_latest(),
                 "delta":   growth_tracker.get_delta(7),
             })
+
+        elif path == "/api/poster/trending":
+            self._json(200, _get_trending_cache())
+
+        elif path == "/api/settings/export":
+            try:
+                b = json.dumps(config_loader.load(), ensure_ascii=False, indent=2).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="threadscope_settings.json"')
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        elif path == "/api/analytics":
+            try:
+                if _DIR not in sys.path:
+                    sys.path.insert(0, _DIR)
+                import comment_memory as cm
+                import reply_cache as rc
+                summary          = cm.get_summary()
+                eng_stats        = cm.get_engagement_stats()
+                recent_eng       = cm.get_engaged_comments(10)
+                activity_by_hour = rc.get_activity_by_hour()
+                peak_hours       = list(rc.get_peak_hours())
+                # Length vs engagement stats
+                try:
+                    mp      = os.path.join(_DIR, "comment_memory.json")
+                    all_mem = json.loads(Path(mp).read_text(encoding="utf-8")) if os.path.exists(mp) else []
+                except Exception:
+                    all_mem = []
+                eng_lens    = [len(e.get("reply","")) for e in all_mem if e.get("engaged") and e.get("reply")]
+                neng_lens   = [len(e.get("reply","")) for e in all_mem if not e.get("engaged") and e.get("reply")]
+                avg_eng     = round(sum(eng_lens)/len(eng_lens))    if eng_lens  else 0
+                avg_neng    = round(sum(neng_lens)/len(neng_lens))   if neng_lens else 0
+                length_stats = {"avg_engaged": avg_eng, "avg_not_engaged": avg_neng,
+                                "sample_engaged": len(eng_lens), "sample_not": len(neng_lens)}
+                # Daily comments
+                daily_comments = _get_daily_comments(7)
+                self._json(200, {
+                    "total":            summary["total"],
+                    "engaged":          summary["engaged"],
+                    "rate":             summary["rate"],
+                    "by_style":         eng_stats.get("by_style",    {}),
+                    "by_sentiment":     eng_stats.get("by_sentiment",{}),
+                    "best_style":       eng_stats.get("best_style",   ""),
+                    "best_sentiment":   eng_stats.get("best_sentiment",""),
+                    "overused_style":   cm.get_overused_style(),
+                    "overused_topic":   cm.get_overused_topic(),
+                    "activity_by_hour": activity_by_hour,
+                    "peak_hours":       peak_hours,
+                    "length_stats":     length_stats,
+                    "daily_comments":   daily_comments,
+                    "recent_engaged": [
+                        {"reply": e.get("reply",""), "style": e.get("style",""),
+                         "topic": e.get("topic_bucket",""), "ts": e.get("ts",0)}
+                        for e in recent_eng
+                    ],
+                })
+            except Exception as exc:
+                self._json(200, {"total":0,"engaged":0,"rate":0,"error":str(exc)})
+
+        elif path == "/api/comments/export":
+            try:
+                items = _get_comments()
+                buf = io.StringIO()
+                w = csv.writer(buf)
+                w.writerow(["timestamp","datetime","caption","reply","post_id","comment_id"])
+                for it in items:
+                    ts = it.get("ts") or 0
+                    try:
+                        dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts > 0 else ""
+                    except (OSError, OverflowError):
+                        dt_str = ""
+                    w.writerow([ts, dt_str, it.get("caption",""), it.get("reply",""),
+                                 it.get("post_id",""), it.get("comment_id","")])
+                b = buf.getvalue().encode("utf-8-sig")
+                self.send_response(200)
+                self.send_header("Content-Type",        "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="threadscope_comments.csv"')
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        elif path == "/api/watcher/stats":
+            self._json(200, _get_watcher_stats())
 
         elif path == "/api/blacklist":
             cfg = config_loader.load()
             self._json(200, cfg.get("blacklisted_accounts", []))
 
         elif path == "/api/logs":
+            qs     = urlparse(self.path).query
+            source = (parse_qs(qs).get("source", ["bot"])[0]).lower()
+            log_map = {"bot": BOT_LOG, "watcher": WATCHER_LOG, "poster": POSTER_LOG}
+            log_file = log_map.get(source, BOT_LOG)
             self.send_response(200)
             self.send_header("Content-Type","text/event-stream; charset=utf-8")
             self.send_header("Cache-Control","no-cache")
             self.send_header("X-Accel-Buffering","no")
             self.end_headers()
-            if not os.path.exists(BOT_LOG): open(BOT_LOG,"w").close()
             try:
-                with open(BOT_LOG,"r",encoding="utf-8",errors="replace") as f:
+                if not os.path.exists(log_file):
+                    open(log_file, "w").close()
+            except OSError:
+                pass
+            try:
+                with open(log_file,"r",encoding="utf-8",errors="replace") as f:
                     for line in f:
                         self.wfile.write(f"data: {line.rstrip()}\n\n".encode())
                     self.wfile.flush()
@@ -1296,12 +1887,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if   path == "/api/bot/start":     self._json(200, _launch(BOT_SCRIPT, BOT_LOG, BOT_PID))
-        elif path == "/api/bot/stop":      self._json(200, _terminate(BOT_PID))
-        elif path == "/api/poster/start":  self._json(200, _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID))
-        elif path == "/api/poster/stop":   self._json(200, _terminate(POSTER_PID))
-        elif path == "/api/watcher/start": self._json(200, _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID))
-        elif path == "/api/watcher/stop":  self._json(200, _terminate(WATCHER_PID))
+        if   path == "/api/bot/start":
+            self._json(200, _launch(BOT_SCRIPT, BOT_LOG, BOT_PID))
+        elif path == "/api/bot/stop":
+            self._json(200, _terminate(BOT_PID))
+        elif path == "/api/poster/start":
+            result = _launch(POSTER_SCRIPT, POSTER_LOG, POSTER_PID)
+            if result.get("ok"):
+                config_loader.save({"poster_enabled": True})
+            self._json(200, result)
+        elif path == "/api/poster/stop":
+            config_loader.save({"poster_enabled": False})
+            self._json(200, _terminate(POSTER_PID))
+        elif path == "/api/watcher/start":
+            self._json(200, _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID))
+        elif path == "/api/watcher/stop":
+            self._json(200, _terminate(WATCHER_PID))
 
         elif path == "/api/settings":
             data = self._body()
@@ -1309,6 +1910,19 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("qoder_model"): os.environ["QODER_MODEL"] = data["qoder_model"]
             if data.get("app_mode"):    os.environ["APP_MODE"]    = data["app_mode"]
             self._json(200, {"ok": config_loader.save(data)})
+
+        elif path == "/api/settings/import":
+            try:
+                data = self._body()
+                if not isinstance(data, dict):
+                    self._json(400, {"ok": False, "msg": "payload harus berupa JSON object"})
+                else:
+                    if data.get("qoder_bin"):   os.environ["QODER_BIN"]   = data["qoder_bin"]
+                    if data.get("qoder_model"): os.environ["QODER_MODEL"] = data["qoder_model"]
+                    if data.get("app_mode"):    os.environ["APP_MODE"]    = data["app_mode"]
+                    self._json(200, {"ok": config_loader.save(data)})
+            except Exception as exc:
+                self._json(400, {"ok": False, "msg": str(exc)})
 
         elif path == "/api/blacklist/add":
             data = self._body()
@@ -1363,3 +1977,4 @@ if __name__ == "__main__":
         print("\nMenghentikan semua proses…")
         _terminate(BOT_PID)
         _terminate(POSTER_PID)
+        _terminate(WATCHER_PID)
