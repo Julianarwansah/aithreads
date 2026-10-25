@@ -161,6 +161,60 @@ def _quality_check(text: str) -> bool:
     return True
 
 
+def _heuristic_score(text: str) -> float:
+    """Nilai draft tanpa LLM call — pilih yang paling natural dari 2 kandidat."""
+    if not text or text == "SKIP":
+        return -999.0
+    score = 100.0
+    score -= len(text) * 0.3
+    if "?" in text:
+        score += 8
+    score -= text.count("!") * 8
+    for w in ["sangat", "keren banget", "luar biasa", "mantap", "semangat", "pasti bisa", "inspiring"]:
+        if w in text.lower():
+            score -= 6
+    for w in ["adalah", "merupakan", "dalam rangka"]:
+        if w in text.lower():
+            score -= 5
+    return score
+
+
+def _score_naturalness(draft: str, caption: str) -> int:
+    """Minta LLM nilai naturalness 1–10. Default 7 (lolos) kalau LLM error."""
+    prompt = (
+        "Nilai seberapa natural komentar Threads berikut (1=robot banget, 10=manusia beneran).\n"
+        "Jawab HANYA angka, tidak ada teks lain.\n\n"
+        f"Post: {caption[:80]}\n"
+        f"Komentar: {draft}"
+    )
+    try:
+        resp = llm_router.generate(prompt)
+        m = re.search(r'\b(10|[1-9])\b', resp)
+        return int(m.group()) if m else 7
+    except Exception:
+        return 7
+
+
+def _build_engagement_constraint() -> str:
+    """Kembalikan instruksi keras berbasis data engagement historis."""
+    try:
+        stats = comment_memory.get_engagement_stats()
+        if not stats:
+            return ""
+        by_style = stats.get("by_style", {})
+        best = stats.get("best_style", "")
+        if best and by_style.get(best, {}).get("total", 0) >= 5:
+            rate = by_style[best].get("rate", 0)
+            if rate >= 0.4:
+                return (
+                    f"\n🎯 DATA REAL: gaya '{best}' paling sering dibalas orang ({rate:.0%})"
+                    f" — WAJIB prioritaskan gaya ini"
+                )
+    except Exception:
+        pass
+    return ""
+
+
 def detect_post_sentiment(caption: str) -> str:
     """
     Deteksi mood postingan: frustrated | win | question | opinion | info
@@ -239,6 +293,9 @@ def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
     # ── persona konsisten ─────────────────────────────────────────────────────
     persona = cfg.get("bot_persona", "").strip()
 
+    # ── engagement constraint dari data historis ──────────────────────────────
+    engagement_constraint = _build_engagement_constraint()
+
     # ── deteksi sentiment postingan ───────────────────────────────────────────
     sentiment = detect_post_sentiment(caption)
     sentiment_hints = {
@@ -283,6 +340,8 @@ def generate_reply(caption: str, existing_replies: List[str] = None) -> str:
                       .replace("{sentiment}", sentiment_line)
                       .replace("{recent_comments}", memory_prompt)
                       .replace("{others_comments}", others_block))
+        if engagement_constraint:
+            sys_prompt += engagement_constraint
         user_prompt = caption
     else:
         persona_line = f"\nLATAR BELAKANG LO: {persona}\n" if persona else ""
@@ -323,12 +382,26 @@ CONTOH JELEK (keliatan AI):
 {others_block}
 
 komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
-{memory_prompt}"""
+{memory_prompt}{engagement_constraint}"""
         user_prompt = caption
 
     def _do_generate():
-        r = llm_router.generate(user_prompt, system_prompt=sys_prompt)
+        # Minta 2 draft sekaligus; pilih yang skor heuristic-nya lebih tinggi
+        two_draft_prompt = (
+            f"Tulis 2 versi komentar yang berbeda gaya (1 kalimat masing-masing), "
+            f"pisahkan dengan ---\n\n{user_prompt}"
+        )
+        r = llm_router.generate(two_draft_prompt, system_prompt=sys_prompt)
         print(f"\n[RAW LLM]: {r}")
+        parts = [p.strip() for p in r.split("---") if p.strip()]
+        if len(parts) >= 2:
+            candidates = [parse_ai_reply(p) for p in parts[:2]]
+            valid = [(t, _heuristic_score(t)) for t in candidates if t and t != "SKIP"]
+            if valid:
+                best_text, best_sc = max(valid, key=lambda x: x[1])
+                print(f"  [DRAFT] {len(valid)} kandidat valid, pilih skor heuristik {best_sc:.1f}: '{best_text[:50]}'")
+                return best_text
+            return "SKIP"
         return parse_ai_reply(r)
 
     try:
@@ -351,6 +424,15 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
                 return "SKIP"
             if not _quality_check(reply):
                 print(f"  [QC] Masih gagal setelah regenerate — pakai hasil terakhir")
+
+        # ── self-critique gate — LLM nilai naturalness ────────────────────────
+        critique_score = _score_naturalness(reply, caption)
+        print(f"  [CRITIQUE] Skor naturalness: {critique_score}/10")
+        if critique_score < 7:
+            print(f"  [CRITIQUE] Skor rendah ({critique_score}/10) — generate ulang…")
+            retry = _do_generate()
+            if retry and retry != "SKIP" and _quality_check(retry):
+                reply = retry
 
         print(f"[FINAL]: {reply} ({len(reply)} kar)\n")
 
