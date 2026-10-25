@@ -8,8 +8,9 @@ import os
 import threading
 import time
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.getenv("REPLY_CACHE_FILE", os.path.join(_DIR, "reply_cache.json"))
+_DIR      = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.getenv("PROFILE_DIR", _DIR)
+CACHE_FILE = os.getenv("REPLY_CACHE_FILE", os.path.join(_DATA_DIR, "reply_cache.json"))
 TTL_SECONDS = 86400
 _lock = threading.Lock()
 

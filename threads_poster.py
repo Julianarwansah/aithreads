@@ -34,7 +34,8 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", st
 logger = logging.getLogger(__name__)
 
 _DIR              = os.path.dirname(os.path.abspath(__file__))
-_LAST_POST_FILE   = os.path.join(_DIR, "poster_last_post.json")
+_DATA_DIR         = os.getenv("PROFILE_DIR", _DIR)
+_LAST_POST_FILE   = os.path.join(_DATA_DIR, "poster_last_post.json")
 
 POST_ENDPOINT = "https://www.threads.com/api/v1/media/configure_text_only_post/"
 
@@ -144,7 +145,7 @@ def generate_thread_content(session) -> str:
     # Simpan hasil scan ke cache agar UI bisa baca
     try:
         from pathlib import Path
-        tc = os.path.join(_DIR, "trending_cache.json")
+        tc = os.path.join(_DATA_DIR, "trending_cache.json")
         Path(tc).write_text(
             json.dumps({"ts": time.time(), "posts": trend_posts[:6]}, ensure_ascii=False, indent=2),
             encoding="utf-8",

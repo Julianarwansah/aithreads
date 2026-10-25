@@ -3,8 +3,9 @@ import os
 import threading
 from datetime import datetime
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-STATS_FILE = os.path.join(_DIR, "stats.json")
+_DIR       = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR  = os.getenv("PROFILE_DIR", _DIR)
+STATS_FILE = os.path.join(_DATA_DIR, "stats.json")
 _lock = threading.Lock()
 
 DEFAULT_STATS = {

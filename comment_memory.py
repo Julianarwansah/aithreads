@@ -12,7 +12,8 @@ import time
 from pathlib import Path
 
 _DIR        = os.path.dirname(os.path.abspath(__file__))
-MEMORY_FILE = os.path.join(_DIR, "comment_memory.json")
+_DATA_DIR   = os.getenv("PROFILE_DIR", _DIR)
+MEMORY_FILE = os.path.join(_DATA_DIR, "comment_memory.json")
 MAX_ENTRIES = 100
 _lock       = threading.Lock()
 

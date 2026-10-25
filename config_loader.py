@@ -8,7 +8,10 @@ import os
 import threading
 
 _DIR          = os.path.dirname(os.path.abspath(__file__))
-SETTINGS_FILE = os.path.join(_DIR, "ui_settings.json")
+# Jika dijalankan sebagai sub-proses akun, gunakan folder profil akun tersebut
+_DATA_DIR     = os.getenv("PROFILE_DIR", _DIR)
+# Akun profil pakai config.json; root (default) tetap pakai ui_settings.json
+SETTINGS_FILE = os.path.join(_DATA_DIR, "config.json" if os.getenv("PROFILE_DIR") else "ui_settings.json")
 _lock         = threading.RLock()   # RLock: boleh di-acquire ulang oleh thread yang sama
 
 DEFAULTS = {

@@ -13,6 +13,7 @@ load_dotenv()
 
 import config_loader
 import growth_tracker
+import account_manager
 
 _DIR           = os.path.dirname(os.path.abspath(__file__))
 BOT_SCRIPT     = os.path.join(_DIR, "auto_commenter.py")
@@ -38,11 +39,13 @@ def _read_pid(pidfile):
 def _is_alive(pidfile):
     return _read_pid(pidfile) is not None
 
-def _launch(script, logfile, pidfile):
+def _launch(script, logfile, pidfile, extra_env=None):
     if _is_alive(pidfile):
         return {"ok": False, "msg": "Sudah berjalan"}
     open(logfile, "w").close()
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if extra_env:
+        env.update(extra_env)
     with open(logfile, "ab") as lf:
         proc = subprocess.Popen(
             [sys.executable, "-u", script],
@@ -90,6 +93,28 @@ def _watchdog_loop():
         if cfg.get("auto_reply_enabled") and Path(WATCHER_PID).exists() and not _is_alive(WATCHER_PID):
             Path(WATCHER_PID).unlink(missing_ok=True)
             _launch(WATCHER_SCRIPT, WATCHER_LOG, WATCHER_PID)
+
+        # Restart proses per-akun yang crash
+        for acct in account_manager.list_accounts():
+            aname   = acct["name"]
+            apath   = acct["path"]
+            aenv    = account_manager.get_account_env(aname)
+            acfg    = account_manager.get_account_config(aname)
+
+            a_bot_pid     = os.path.join(apath, "bot.pid")
+            a_poster_pid  = os.path.join(apath, "poster.pid")
+            a_watcher_pid = os.path.join(apath, "watcher.pid")
+
+            if Path(a_bot_pid).exists() and not _is_alive(a_bot_pid):
+                Path(a_bot_pid).unlink(missing_ok=True)
+                _launch(BOT_SCRIPT, os.path.join(apath, "bot.log"), a_bot_pid, extra_env=aenv)
+                _watchdog_restart_count += 1
+            if acfg.get("poster_enabled") and Path(a_poster_pid).exists() and not _is_alive(a_poster_pid):
+                Path(a_poster_pid).unlink(missing_ok=True)
+                _launch(POSTER_SCRIPT, os.path.join(apath, "poster.log"), a_poster_pid, extra_env=aenv)
+            if acfg.get("auto_reply_enabled") and Path(a_watcher_pid).exists() and not _is_alive(a_watcher_pid):
+                Path(a_watcher_pid).unlink(missing_ok=True)
+                _launch(WATCHER_SCRIPT, os.path.join(apath, "watcher.log"), a_watcher_pid, extra_env=aenv)
 
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
@@ -200,6 +225,28 @@ def _get_trending_cache() -> dict:
     except Exception:
         pass
     return {"ts": 0, "posts": []}
+
+
+def _get_account_full_status(name: str) -> dict:
+    """Status lengkap satu akun: proses + stats + config."""
+    apath       = os.path.join(_DIR, "accounts", name)
+    bot_pid     = os.path.join(apath, "bot.pid")
+    poster_pid  = os.path.join(apath, "poster.pid")
+    watcher_pid = os.path.join(apath, "watcher.pid")
+    stats       = account_manager.get_account_stats(name)
+    cfg         = account_manager.get_account_config(name)
+    creds       = account_manager._dotenv_values(os.path.join(apath, ".env"))
+    return {
+        "name":              name,
+        "username":          creds.get("THREADS_USERNAME", name),
+        "bot_running":       _is_alive(bot_pid),
+        "poster_running":    _is_alive(poster_pid),
+        "watcher_running":   _is_alive(watcher_pid),
+        "last_comment":      stats.get("last_comment_time", ""),
+        "comments_sent":     stats.get("comments_sent", 0),
+        "poster_enabled":    cfg.get("poster_enabled", False),
+        "auto_reply_enabled":cfg.get("auto_reply_enabled", False),
+    }
 
 
 def _get_daily_comments(days: int = 7) -> list:
@@ -396,6 +443,28 @@ nav{width:196px;background:var(--surf);border-right:1px solid var(--brd);padding
 /* settings */
 .set-layout{display:grid;grid-template-columns:172px 1fr;flex:1;overflow:hidden}
 .set-nav{border-right:1px solid var(--brd);padding:10px 8px;display:flex;flex-direction:column;gap:1px}
+
+/* multi-account */
+.acct-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.acct-card{background:var(--surf);border:1px solid var(--brd);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.acct-card .acct-hdr{display:flex;justify-content:space-between;align-items:flex-start}
+.acct-card .acct-uname{font-size:14px;font-weight:700;color:var(--txt)}
+.acct-card .acct-label{font-size:10px;color:var(--muted);margin-top:2px}
+.acct-card .acct-proc{display:flex;flex-direction:column;gap:6px}
+.proc-row{display:flex;align-items:center;gap:8px}
+.proc-row .proc-lbl{font-size:11px;color:var(--muted);width:52px;flex-shrink:0}
+.proc-row .badge{flex:1}
+.acct-foot{font-size:11px;color:var(--muted2);padding-top:4px;border-top:1px solid var(--brd2)}
+/* modal overlay */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-box{background:var(--surf);border:1px solid var(--brd);border-radius:10px;width:min(520px,95vw);max-height:90vh;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+.modal-box h3{font-size:15px;font-weight:700;margin:0}
+.form-row{display:flex;flex-direction:column;gap:4px}
+.form-row label{font-size:11px;color:var(--muted)}
+.form-row input,.form-row textarea,.form-row select{background:var(--surf2);border:1px solid var(--brd);border-radius:6px;padding:7px 10px;color:var(--txt);font-size:12px;outline:none;width:100%}
+.form-row input:focus,.form-row textarea:focus{border-color:var(--blue)}
+.form-row textarea{resize:vertical;min-height:60px;font-family:inherit}
 .snav{padding:7px 10px;border-radius:5px;cursor:pointer;color:var(--muted);font-size:12px;transition:all .1s}
 .snav:hover{background:var(--surf2);color:var(--txt)}
 .snav.on{background:var(--surf2);color:var(--txt);font-weight:600}
@@ -478,6 +547,9 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   </button>
   <button class="nav-item" onclick="goPage('watcher')" id="nav-watcher">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Watcher
+  </button>
+  <button class="nav-item" onclick="goPage('akun')" id="nav-akun">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>Multi-Akun
   </button>
   <button class="nav-item" onclick="goPage('growth')" id="nav-growth">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Growth
@@ -884,6 +956,67 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     <div id="w-replied-list"><div style="color:var(--muted);font-size:12px">Memuat…</div></div>
   </div>
 
+</div></div>
+
+<!-- ════════════════════════════ MULTI-AKUN ══════════════════════════════════ -->
+<div class="page" id="page-akun">
+<div class="page-body">
+
+  <div class="btn-row" style="justify-content:space-between;align-items:center">
+    <span style="font-size:13px;font-weight:600;color:var(--txt)">Akun Aktif</span>
+    <button class="btn btn-green" onclick="openAddAccount()">+ Tambah Akun</button>
+  </div>
+
+  <div class="acct-grid" id="acct-grid">
+    <div style="color:var(--muted);font-size:12px">Memuat…</div>
+  </div>
+
+  <div class="card" style="font-size:11px;color:var(--muted);line-height:1.7">
+    <div class="card-hdr">Cara Pakai Multi-Akun</div>
+    <div>1. Klik <b>Tambah Akun</b> dan masukkan credentials setiap akun Threads.</div>
+    <div>2. Setiap akun punya folder data sendiri — histori, stats, dan memory tidak bercampur.</div>
+    <div>3. Klik <b>▶ Bot</b> pada kartu akun untuk mulai. Semua akun bisa jalan bersamaan.</div>
+    <div>4. Klik ⚙ untuk atur persona, delay, topik, dan blacklist per-akun.</div>
+  </div>
+
+</div></div>
+
+<!-- modal tambah akun -->
+<div class="modal-overlay" id="modal-add-acct" onclick="if(event.target===this)closeModal('modal-add-acct')">
+<div class="modal-box">
+  <h3>Tambah Akun Baru</h3>
+  <div class="form-row"><label>Nama / Label Akun</label><input id="fa-name" placeholder="contoh: akun_utama"></div>
+  <div class="form-row"><label>THREADS_USERNAME (tanpa @)</label><input id="fa-uname" placeholder="username_threads"></div>
+  <div class="form-row"><label>THREADS_SESSION_ID *</label><input id="fa-sid" placeholder="sessionid dari cookie"></div>
+  <div class="form-row"><label>THREADS_CSRF_TOKEN *</label><input id="fa-csrf" placeholder="csrftoken dari cookie"></div>
+  <div class="form-row"><label>THREADS_DS_USER_ID *</label><input id="fa-uid" placeholder="ds_user_id dari cookie"></div>
+  <div class="form-row"><label>THREADS_MID</label><input id="fa-mid" placeholder="mid dari cookie (opsional)"></div>
+  <div class="form-row"><label>THREADS_IG_DID</label><input id="fa-igdid" placeholder="ig_did dari cookie (opsional)"></div>
+  <div class="btn-row">
+    <button class="btn btn-green" onclick="createAccount()">Simpan Akun</button>
+    <button class="btn btn-ghost" onclick="closeModal('modal-add-acct')">Batal</button>
+  </div>
+  <div id="fa-msg" style="font-size:11px;color:var(--red);display:none"></div>
+</div></div>
+
+<!-- modal settings akun -->
+<div class="modal-overlay" id="modal-acct-set" onclick="if(event.target===this)closeModal('modal-acct-set')">
+<div class="modal-box">
+  <h3 id="aset-title">Pengaturan Akun</h3>
+  <input type="hidden" id="aset-name">
+  <div class="form-row"><label>Persona Bot</label><textarea id="aset-persona" rows="3"></textarea></div>
+  <div class="form-row"><label>Delay Min (menit)</label><input type="number" id="aset-dmin"></div>
+  <div class="form-row"><label>Delay Max (menit)</label><input type="number" id="aset-dmax"></div>
+  <div class="form-row"><label>Jam Aktif Mulai</label><input type="number" id="aset-hstart" min="0" max="23"></div>
+  <div class="form-row"><label>Jam Aktif Selesai</label><input type="number" id="aset-hend" min="0" max="23"></div>
+  <div class="form-row"><label>Interval Poster (jam)</label><input type="number" id="aset-pint"></div>
+  <div class="form-row"><label>Topik Poster (satu per baris)</label><textarea id="aset-topics" rows="4"></textarea></div>
+  <div class="form-row"><label>Blacklist (satu username per baris)</label><textarea id="aset-bl" rows="3"></textarea></div>
+  <div class="btn-row">
+    <button class="btn btn-green" onclick="saveAcctSettings()">Simpan</button>
+    <button class="btn btn-ghost" onclick="closeModal('modal-acct-set')">Batal</button>
+  </div>
+  <div id="aset-msg" style="font-size:11px;color:var(--green);display:none"></div>
 </div></div>
 
 <!-- ════════════════════════════ ANALITIK ════════════════════════════════════ -->
@@ -1613,6 +1746,120 @@ async function loadAutoBlacklist(){
   }catch(e){}
 }
 
+// ── multi-account ─────────────────────────────────────────────────────────
+function closeModal(id){document.getElementById(id).classList.remove('open');}
+function openAddAccount(){
+  ['fa-name','fa-uname','fa-sid','fa-csrf','fa-uid','fa-mid','fa-igdid'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  const m=document.getElementById('fa-msg'); if(m){m.style.display='none';}
+  document.getElementById('modal-add-acct').classList.add('open');
+}
+async function createAccount(){
+  const name   = document.getElementById('fa-name').value.trim();
+  const uname  = document.getElementById('fa-uname').value.trim();
+  const sid    = document.getElementById('fa-sid').value.trim();
+  const csrf   = document.getElementById('fa-csrf').value.trim();
+  const uid    = document.getElementById('fa-uid').value.trim();
+  const mid    = document.getElementById('fa-mid').value.trim();
+  const igdid  = document.getElementById('fa-igdid').value.trim();
+  const msg    = document.getElementById('fa-msg');
+  if(!name||!sid||!csrf||!uid){
+    msg.textContent='Nama, SESSION_ID, CSRF_TOKEN, dan DS_USER_ID wajib diisi.';
+    msg.style.display='block'; return;
+  }
+  const r = await fetch('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,creds:{THREADS_USERNAME:uname,THREADS_SESSION_ID:sid,
+      THREADS_CSRF_TOKEN:csrf,THREADS_DS_USER_ID:uid,THREADS_MID:mid,THREADS_IG_DID:igdid}})});
+  const d = await r.json();
+  if(d.ok){closeModal('modal-add-acct');loadAccounts();}
+  else{msg.textContent=d.msg||'Gagal';msg.style.display='block';}
+}
+async function deleteAcct(name){
+  if(!confirm(`Hapus akun "${name}"? Semua data akan dihapus permanen.`)) return;
+  const d=await(await fetch('/api/accounts/'+name+'/delete',{method:'POST'})).json();
+  if(d.ok) loadAccounts();
+  else alert(d.msg||'Gagal menghapus');
+}
+async function acctProcess(name,proc,action){
+  const d=await(await fetch(`/api/accounts/${name}/${proc}/${action}`,{method:'POST'})).json();
+  if(!d.ok && d.msg) console.warn(d.msg);
+  loadAccounts();
+}
+async function openAcctSettings(name){
+  const d=await(await fetch('/api/accounts/'+name+'/settings')).json();
+  document.getElementById('aset-name').value=name;
+  document.getElementById('aset-title').textContent='⚙ Pengaturan: '+name;
+  document.getElementById('aset-persona').value=d.bot_persona||'';
+  document.getElementById('aset-dmin').value=d.delay_min_minutes||14;
+  document.getElementById('aset-dmax').value=d.delay_max_minutes||17;
+  document.getElementById('aset-hstart').value=d.active_start_hour||7;
+  document.getElementById('aset-hend').value=d.active_end_hour||23;
+  document.getElementById('aset-pint').value=d.poster_interval_hours||48;
+  document.getElementById('aset-topics').value=(d.poster_topics||[]).join('\n');
+  document.getElementById('aset-bl').value=(d.blacklisted_accounts||[]).join('\n');
+  const m=document.getElementById('aset-msg'); if(m) m.style.display='none';
+  document.getElementById('modal-acct-set').classList.add('open');
+}
+async function saveAcctSettings(){
+  const name=document.getElementById('aset-name').value;
+  const payload={
+    bot_persona:     document.getElementById('aset-persona').value.trim(),
+    delay_min_minutes: parseInt(document.getElementById('aset-dmin').value)||14,
+    delay_max_minutes: parseInt(document.getElementById('aset-dmax').value)||17,
+    active_start_hour: parseInt(document.getElementById('aset-hstart').value)||7,
+    active_end_hour:   parseInt(document.getElementById('aset-hend').value)||23,
+    poster_interval_hours: parseFloat(document.getElementById('aset-pint').value)||48,
+    poster_topics: document.getElementById('aset-topics').value.split('\n').map(s=>s.trim()).filter(Boolean),
+    blacklisted_accounts: document.getElementById('aset-bl').value.split('\n').map(s=>s.trim().replace('@','')).filter(Boolean),
+  };
+  const d=await(await fetch('/api/accounts/'+name+'/settings',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  const m=document.getElementById('aset-msg');
+  m.textContent=d.ok?'Tersimpan!':d.msg||'Gagal';
+  m.style.color=d.ok?'var(--green)':'var(--red)';
+  m.style.display='block';
+}
+async function loadAccounts(){
+  const grid=document.getElementById('acct-grid');
+  if(!grid) return;
+  const accounts=await(await fetch('/api/accounts')).json();
+  if(!accounts.length){
+    grid.innerHTML='<div style="color:var(--muted);font-size:12px">Belum ada akun. Klik <b>Tambah Akun</b> untuk mulai.</div>';
+    return;
+  }
+  grid.innerHTML=accounts.map(a=>{
+    const botBadge  = a.bot_running    ?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
+    const postBadge = a.poster_running ?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
+    const watBadge  = a.watcher_running?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
+    const botBtn    = a.bot_running    ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','bot','stop')">■ Stop</button>`
+                                       :`<button class="btn btn-green xs" onclick="acctProcess('${a.name}','bot','start')">▶ Start</button>`;
+    const postBtn   = a.poster_running ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','poster','stop')">■ Stop</button>`
+                                       :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','poster','start')">▶ Start</button>`;
+    const watBtn    = a.watcher_running?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','watcher','stop')">■ Stop</button>`
+                                       :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','watcher','start')">▶ Start</button>`;
+    const lastCmt   = a.last_comment ? `terakhir: ${a.last_comment}` : 'belum pernah komentar';
+    return `<div class="acct-card">
+      <div class="acct-hdr">
+        <div>
+          <div class="acct-uname">@${a.username}</div>
+          <div class="acct-label">${a.name}</div>
+        </div>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-ghost xs" onclick="openAcctSettings('${a.name}')">⚙</button>
+          <button class="btn btn-danger xs" onclick="deleteAcct('${a.name}')">✕</button>
+        </div>
+      </div>
+      <div class="acct-proc">
+        <div class="proc-row"><span class="proc-lbl">Bot</span>${botBadge}${botBtn}</div>
+        <div class="proc-row"><span class="proc-lbl">Poster</span>${postBadge}${postBtn}</div>
+        <div class="proc-row"><span class="proc-lbl">Watcher</span>${watBadge}${watBtn}</div>
+      </div>
+      <div class="acct-foot">${a.comments_sent} komentar total · ${lastCmt}</div>
+    </div>`;
+  }).join('');
+}
+
 // ── page nav with data loading ───────────────────────────────────────────
 function goPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -1623,6 +1870,7 @@ function goPage(id){
   if(id==='set')loadSettings();
   if(id==='poster')loadPosterPosts();
   if(id==='watcher')loadWatcher();
+  if(id==='akun')loadAccounts();
   if(id==='growth'){loadGrowth();}
   if(id==='analytics'){loadAnalytics();}
   if(id==='bl'){loadBlacklist();loadAutoBlacklist();}
@@ -1846,6 +2094,14 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/watcher/stats":
             self._json(200, _get_watcher_stats())
 
+        elif path == "/api/accounts":
+            statuses = [_get_account_full_status(a["name"]) for a in account_manager.list_accounts()]
+            self._json(200, statuses)
+
+        elif path.startswith("/api/accounts/") and path.endswith("/settings"):
+            aname = path.split("/")[3]
+            self._json(200, account_manager.get_account_config(aname))
+
         elif path == "/api/blacklist":
             cfg = config_loader.load()
             self._json(200, cfg.get("blacklisted_accounts", []))
@@ -1887,7 +2143,56 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if   path == "/api/bot/start":
+        # ── per-account endpoints ─────────────────────────────────────────────
+        if path == "/api/accounts":
+            data  = self._body()
+            aname = data.get("name", "").strip()
+            creds = data.get("creds", {})
+            self._json(200, account_manager.create_account(aname, creds))
+
+        elif path.startswith("/api/accounts/") and len(path.split("/")) >= 4:
+            parts  = path.split("/")   # ['','api','accounts','name','proc','action']
+            aname  = parts[3]
+            action = "/".join(parts[4:]) if len(parts) > 4 else ""
+            apath  = os.path.join(_DIR, "accounts", aname)
+            aenv   = account_manager.get_account_env(aname)
+
+            if action == "delete":
+                # Hentikan semua proses akun sebelum hapus
+                for pf in ["bot.pid", "poster.pid", "watcher.pid"]:
+                    _terminate(os.path.join(apath, pf))
+                self._json(200, account_manager.delete_account(aname))
+
+            elif action == "bot/start":
+                self._json(200, _launch(BOT_SCRIPT,
+                    os.path.join(apath, "bot.log"), os.path.join(apath, "bot.pid"), extra_env=aenv))
+            elif action == "bot/stop":
+                self._json(200, _terminate(os.path.join(apath, "bot.pid")))
+
+            elif action == "poster/start":
+                r = _launch(POSTER_SCRIPT,
+                    os.path.join(apath, "poster.log"), os.path.join(apath, "poster.pid"), extra_env=aenv)
+                if r.get("ok"):
+                    account_manager.save_account_config(aname, {"poster_enabled": True})
+                self._json(200, r)
+            elif action == "poster/stop":
+                account_manager.save_account_config(aname, {"poster_enabled": False})
+                self._json(200, _terminate(os.path.join(apath, "poster.pid")))
+
+            elif action == "watcher/start":
+                self._json(200, _launch(WATCHER_SCRIPT,
+                    os.path.join(apath, "watcher.log"), os.path.join(apath, "watcher.pid"), extra_env=aenv))
+            elif action == "watcher/stop":
+                self._json(200, _terminate(os.path.join(apath, "watcher.pid")))
+
+            elif action == "settings":
+                data = self._body()
+                self._json(200, {"ok": account_manager.save_account_config(aname, data)})
+
+            else:
+                self._json(404, {"error": "not found"})
+
+        elif path == "/api/bot/start":
             self._json(200, _launch(BOT_SCRIPT, BOT_LOG, BOT_PID))
         elif path == "/api/bot/stop":
             self._json(200, _terminate(BOT_PID))

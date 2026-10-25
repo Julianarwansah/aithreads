@@ -64,8 +64,9 @@ def _auto_blacklist(username: str):
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-REPLIED_CACHE_FILE = os.path.join(_DIR, "replied_cache.json")
+_DIR               = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR          = os.getenv("PROFILE_DIR", _DIR)
+REPLIED_CACHE_FILE = os.path.join(_DATA_DIR, "replied_cache.json")
 
 # Endpoint komentar pada media tertentu (comment_id = pk komentar kita)
 COMMENTS_URL = "https://www.threads.com/api/v1/media/{media_id}/comments/"
