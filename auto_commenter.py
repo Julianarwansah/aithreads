@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 # WAJIB sebelum import modul lokal, supaya isi .env sudah termuat
 # (llm_router & reply_cache membaca environment saat di-import)
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import stats_tracker
 import reply_cache
@@ -841,16 +841,31 @@ def load_latest_query_config() -> Dict[str, str]:
 
 def get_fresh_tokens(session) -> Dict[str, str]:
     tokens: Dict[str, str] = {"lsd": "", "fb_dtsg": ""}
-    try:
-        resp = session.get(THREADS_HOME, timeout=20)
-        for pat in [r'"LSD",\[\],\{"token":"([^"]+)"\}', r'"lsd":"([^"]+)"']:
-            m = re.search(pat, resp.text)
-            if m: tokens["lsd"] = m.group(1); break
-        for pat in [r'"DTSGInitialData",\[\],\{"token":"([^"]+)"\}', r'"fb_dtsg":"([^"]+)"']:
-            m = re.search(pat, resp.text)
-            if m: tokens["fb_dtsg"] = m.group(1); break
-    except Exception:
-        pass
+    LSD_PATTERNS   = [r'"LSD",\[\],\{"token":"([^"]+)"\}', r'"lsd":"([^"]+)"']
+    DTSG_PATTERNS  = [r'"DTSGInitialData",\[\],\{"token":"([^"]+)"\}', r'"fb_dtsg":"([^"]+)"',
+                      r'DTSGInitialData[^{]*\{"token":"([^"]+)"']
+
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                time.sleep(3 * attempt)
+            resp = session.get(THREADS_HOME, timeout=20)
+            for pat in LSD_PATTERNS:
+                m = re.search(pat, resp.text)
+                if m: tokens["lsd"] = m.group(1); break
+            for pat in DTSG_PATTERNS:
+                m = re.search(pat, resp.text)
+                if m:
+                    val = m.group(1)
+                    if len(val) > 5:
+                        tokens["fb_dtsg"] = val
+                    break
+        except Exception:
+            pass
+
+        if tokens["lsd"] and tokens["fb_dtsg"]:
+            break
+
     return tokens
 
 def fetch_timeline(session, tokens: Dict[str, str], query_config: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -1330,7 +1345,18 @@ def main():
 
         except SessionExpiredError as e:
             print(f"[AUTH] Session expired: {e}")
-            print("[AUTH] Mencoba reload credentials dari .env…")
+            print("[AUTH] Mencoba ambil cookies segar dari Chrome…")
+            try:
+                from services.extract_chrome_cookies import extract_and_update
+                refreshed = extract_and_update(verbose=True)
+            except Exception as _ex:
+                refreshed = False
+                print(f"[AUTH] Chrome extraction error: {_ex}")
+
+            if refreshed:
+                load_dotenv(override=True)
+                print("[AUTH] Cookies Chrome berhasil diperbarui, reload session…")
+
             sm2 = SessionManager()
             if sm2.load_session() and sm2.validate_session().status == SessionStatus.VALID:
                 session = sm2.inject_session()

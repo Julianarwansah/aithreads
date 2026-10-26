@@ -28,7 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import config_loader
 import comment_memory
