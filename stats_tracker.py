@@ -31,6 +31,10 @@ DEFAULT_STATS = {
     "li_posts_skipped": 0,
     "li_replies_sent": 0,
     "li_errors": 0,
+    # Job Hunter stats
+    "job_comments_sent": 0,
+    "job_comment_failures": 0,
+    "job_dms_sent": 0,
 }
 
 def _load_stats():

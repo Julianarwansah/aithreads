@@ -26,6 +26,10 @@ BOT_PID        = os.path.join(_DIR, "bot.pid")
 POSTER_PID     = os.path.join(_DIR, "poster.pid")
 WATCHER_PID    = os.path.join(_DIR, "watcher.pid")
 
+JH_SCRIPT = os.path.join(_DIR, "job_hunter.py")
+JH_LOG    = os.path.join(_DIR, "job_hunter.log")
+JH_PID    = os.path.join(_DIR, "job_hunter.pid")
+
 LI_COMMENTER_SCRIPT  = os.path.join(_DIR, "linkedin_commenter.py")
 LI_POSTER_SCRIPT     = os.path.join(_DIR, "linkedin_poster.py")
 LI_WATCHER_SCRIPT    = os.path.join(_DIR, "linkedin_reply_watcher.py")
@@ -368,6 +372,57 @@ def _get_li_stats() -> dict:
     }
 
 
+def _get_jh_status() -> dict:
+    """Status Job Hunter + stats."""
+    sp = os.path.join(_DIR, "stats.json")
+    try:
+        s = json.loads(Path(sp).read_text(encoding="utf-8")) if os.path.exists(sp) else {}
+    except Exception:
+        s = {}
+    cfg = config_loader.load()
+    # Hitung total dari file aplikasi
+    apps_file = os.path.join(_DIR, "job_applications.json")
+    total_found = 0
+    try:
+        if os.path.exists(apps_file):
+            total_found = len(json.loads(Path(apps_file).read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    return {
+        "running":               _is_alive(JH_PID),
+        "pid":                   _read_pid(JH_PID),
+        "job_comments_sent":     s.get("job_comments_sent", 0),
+        "job_dms_sent":          s.get("job_dms_sent", 0),
+        "job_comment_failures":  s.get("job_comment_failures", 0),
+        "total_found":           total_found,
+        "cv_summary":            cfg.get("job_hunter_cv_summary", ""),
+        "interval":              cfg.get("job_hunter_scan_interval_minutes", 45),
+        "h_start":               cfg.get("job_hunter_active_start_hour", 8),
+        "h_end":                 cfg.get("job_hunter_active_end_hour", 21),
+    }
+
+
+def _get_jh_applications() -> list:
+    """Daftar lamaran dari job_applications.json, terbaru dulu."""
+    apps_file = os.path.join(_DIR, "job_applications.json")
+    try:
+        data = json.loads(Path(apps_file).read_text(encoding="utf-8")) if os.path.exists(apps_file) else {}
+    except Exception:
+        data = {}
+    result = []
+    for post_id, entry in data.items():
+        result.append({
+            "post_id":  post_id,
+            "date":     entry.get("date", ""),
+            "username": entry.get("username", "?"),
+            "job_type": entry.get("job_type", "?"),
+            "comment":  entry.get("comment", ""),
+            "dm_sent":  entry.get("dm_sent", False),
+        })
+    result.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return result[:50]
+
+
 def _get_poster_posts():
     """Ambil riwayat postingan dari poster_output.log."""
     posts = []
@@ -617,6 +672,9 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   </button>
   <button class="nav-item" onclick="goPage('bl')" id="nav-bl">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Blacklist
+  </button>
+  <button class="nav-item" onclick="goPage('jobs')" id="nav-jobs">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>Job Hunter
   </button>
   <div class="nav-sep"></div>
   <button class="nav-item" onclick="goPage('li')" id="nav-li">
@@ -1152,6 +1210,55 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     </div>
     <div id="bl-auto-list" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px"></div>
   </div>
+
+</div></div>
+
+<!-- ════════════════════════════ JOB HUNTER ══════════════════════════════════ -->
+<div class="page" id="page-jobs">
+<div class="page-header"><h2>Job Hunter</h2><span class="page-sub">Auto-lamar lowongan IT di Threads</span></div>
+
+<div class="card" style="margin-bottom:14px">
+  <div class="card-title">Status & Kontrol</div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-green" id="jh-start-btn" onclick="jhAction('start')">▶ Start Job Hunter</button>
+    <button class="btn btn-red"   id="jh-stop-btn"  onclick="jhAction('stop')" style="display:none">■ Stop</button>
+    <span id="jh-status-badge" style="font-size:12px;color:var(--muted)">Memuat…</span>
+  </div>
+</div>
+
+<div class="stats-grid" style="margin-bottom:14px">
+  <div class="stat-card"><div class="stat-val" id="jh-stat-found">–</div><div class="stat-lbl">Lowongan Ditemukan</div></div>
+  <div class="stat-card"><div class="stat-val" id="jh-stat-applied">–</div><div class="stat-lbl">Sudah Dilamar</div></div>
+  <div class="stat-card"><div class="stat-val" id="jh-stat-dm">–</div><div class="stat-lbl">DM Terkirim</div></div>
+  <div class="stat-card"><div class="stat-val" id="jh-stat-fail">–</div><div class="stat-lbl">Gagal</div></div>
+</div>
+
+<div class="card" style="margin-bottom:14px">
+  <div class="card-title">Pengaturan CV Summary</div>
+  <div class="form-row">
+    <label>Ringkasan skill / CV kamu (dipakai AI untuk buat komentar lamaran)</label>
+    <textarea id="jh-cv" rows="3" placeholder="contoh: dev ~3 tahun (python + js + react), pernah bikin SaaS kecil, ngulik AI/LLM"></textarea>
+  </div>
+  <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+    <div><label>Interval Scan (menit)</label><input type="number" id="jh-interval" min="15" max="180" value="45"></div>
+    <div><label>Jam Aktif</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="number" id="jh-hstart" min="0" max="23" value="8" style="width:60px">
+        <span style="color:var(--muted)">–</span>
+        <input type="number" id="jh-hend" min="0" max="23" value="21" style="width:60px">
+      </div>
+    </div>
+  </div>
+  <div class="btn-row"><button class="btn btn-green" onclick="saveJhSettings()">Simpan Pengaturan</button><span id="jh-save-msg" style="font-size:11px;color:var(--green);display:none">Tersimpan!</span></div>
+</div>
+
+<div class="card">
+  <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+    Riwayat Lamaran
+    <button class="btn btn-ghost xs" onclick="loadJhApplications()">↺ Refresh</button>
+  </div>
+  <div id="jh-app-list" style="font-size:13px">Memuat…</div>
+</div>
 
 </div></div>
 
@@ -1986,7 +2093,8 @@ async function loadAccounts(){
     const lastCmt = a.last_comment ? `terakhir: ${a.last_comment}` : 'belum pernah komentar';
     const defBadge = isDefault ? `<span style="font-size:9px;background:var(--purple);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px">UTAMA</span>` : '';
     const actionBtns = isDefault
-      ? `<button class="btn btn-ghost xs" onclick="goPage('set')">⚙ Pengaturan</button>`
+      ? `<button class="btn btn-ghost xs" onclick="refreshChromeSession()">🔄 Refresh Chrome</button>
+         <button class="btn btn-ghost xs" onclick="goPage('set')">⚙ Pengaturan</button>`
       : `<button class="btn btn-ghost xs" onclick="openAcctSettings('${a.name}')">⚙</button>
          <button class="btn btn-danger xs" onclick="deleteAcct('${a.name}')">✕</button>`;
 
@@ -2008,6 +2116,100 @@ async function loadAccounts(){
   }).join('');
 }
 
+async function refreshChromeSession(){
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Mengambil…';
+  try {
+    const d = await (await fetch('/api/session/refresh-chrome', {method:'POST'})).json();
+    if(d.ok){
+      btn.textContent = '✅ Berhasil';
+      btn.style.color = 'var(--green)';
+      // Restart bot otomatis supaya pakai cookies baru
+      await fetch('/api/bot/stop',{method:'POST'});
+      await new Promise(r=>setTimeout(r,800));
+      await fetch('/api/bot/start',{method:'POST'});
+      await loadAccounts();
+      setTimeout(()=>{btn.textContent='🔄 Refresh Chrome';btn.disabled=false;btn.style.color='';},3000);
+    } else {
+      btn.textContent = '❌ Gagal';
+      btn.style.color = 'var(--red)';
+      alert(d.msg || 'Gagal refresh session');
+      setTimeout(()=>{btn.textContent='🔄 Refresh Chrome';btn.disabled=false;btn.style.color='';},3000);
+    }
+  } catch(e){
+    btn.textContent = '❌ Error';
+    btn.style.color = 'var(--red)';
+    setTimeout(()=>{btn.textContent='🔄 Refresh Chrome';btn.disabled=false;btn.style.color='';},3000);
+  }
+}
+
+// ── Job Hunter ────────────────────────────────────────────────────────────────
+async function loadJhStatus(){
+  try {
+    const d = await (await fetch('/api/jh/status')).json();
+    const running = d.running;
+    document.getElementById('jh-start-btn').style.display = running ? 'none'  : '';
+    document.getElementById('jh-stop-btn').style.display  = running ? ''      : 'none';
+    document.getElementById('jh-status-badge').textContent = running
+      ? `● Berjalan (PID ${d.pid||'?'})` : '○ Tidak berjalan';
+    document.getElementById('jh-status-badge').style.color = running ? 'var(--green)' : 'var(--muted)';
+    document.getElementById('jh-stat-applied').textContent = d.job_comments_sent  ?? '0';
+    document.getElementById('jh-stat-dm').textContent      = d.job_dms_sent       ?? '0';
+    document.getElementById('jh-stat-fail').textContent    = d.job_comment_failures ?? '0';
+    document.getElementById('jh-stat-found').textContent   = d.total_found        ?? '0';
+    // Populate settings
+    if(d.cv_summary !== undefined) document.getElementById('jh-cv').value        = d.cv_summary;
+    if(d.interval   !== undefined) document.getElementById('jh-interval').value  = d.interval;
+    if(d.h_start    !== undefined) document.getElementById('jh-hstart').value    = d.h_start;
+    if(d.h_end      !== undefined) document.getElementById('jh-hend').value      = d.h_end;
+  } catch(e){ console.error('jh status', e); }
+}
+async function jhAction(action){
+  const d = await (await fetch('/api/jh/'+action, {method:'POST'})).json();
+  if(!d.ok && d.msg) alert(d.msg);
+  await loadJhStatus();
+}
+async function saveJhSettings(){
+  const payload = {
+    cv_summary: document.getElementById('jh-cv').value.trim(),
+    interval:   parseInt(document.getElementById('jh-interval').value),
+    h_start:    parseInt(document.getElementById('jh-hstart').value),
+    h_end:      parseInt(document.getElementById('jh-hend').value),
+  };
+  const d = await (await fetch('/api/jh/settings', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})).json();
+  const m = document.getElementById('jh-save-msg');
+  m.textContent = d.ok ? 'Tersimpan!' : d.msg || 'Gagal';
+  m.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  m.style.display = 'block';
+  setTimeout(()=>m.style.display='none', 2000);
+}
+async function loadJhApplications(){
+  const el = document.getElementById('jh-app-list');
+  if(!el) return;
+  try {
+    const apps = await (await fetch('/api/jh/applications')).json();
+    if(!apps.length){ el.innerHTML='<div style="color:var(--muted);padding:12px">Belum ada lamaran.</div>'; return; }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="color:var(--muted);border-bottom:1px solid var(--bdr)">
+        <th style="text-align:left;padding:6px 4px">Tanggal</th>
+        <th style="text-align:left;padding:6px 4px">Akun</th>
+        <th style="text-align:left;padding:6px 4px">Tipe</th>
+        <th style="text-align:left;padding:6px 4px">Komentar</th>
+        <th style="text-align:center;padding:6px 4px">DM</th>
+      </tr></thead>
+      <tbody>${apps.map(a=>`<tr style="border-bottom:1px solid var(--bdr)">
+        <td style="padding:6px 4px;color:var(--muted)">${a.date||''}</td>
+        <td style="padding:6px 4px"><a href="https://www.threads.com/@${a.username}" target="_blank" style="color:var(--purple)">@${a.username||'?'}</a></td>
+        <td style="padding:6px 4px"><span style="background:var(--surf2);padding:2px 6px;border-radius:8px">${a.job_type||'?'}</span></td>
+        <td style="padding:6px 4px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(a.comment||'').replace(/"/g,'&quot;')}">${a.comment||''}</td>
+        <td style="padding:6px 4px;text-align:center">${a.dm_sent?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--muted)">–</span>'}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e){ el.innerHTML='<div style="color:var(--red)">Gagal memuat.</div>'; }
+}
+
 // ── page nav with data loading ───────────────────────────────────────────
 function goPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -2022,6 +2224,7 @@ function goPage(id){
   if(id==='growth'){loadGrowth();}
   if(id==='analytics'){loadAnalytics();}
   if(id==='bl'){loadBlacklist();loadAutoBlacklist();}
+  if(id==='jobs'){loadJhStatus();loadJhApplications();}
   if(id==='li'){loadLiStatus();}
 }
 
@@ -2307,6 +2510,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/watcher/stats":
             self._json(200, _get_watcher_stats())
 
+        elif path == "/api/jh/status":
+            self._json(200, _get_jh_status())
+        elif path == "/api/jh/applications":
+            self._json(200, _get_jh_applications())
+
         elif path == "/api/li/status":
             self._json(200, _get_li_stats())
 
@@ -2443,6 +2651,35 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/watcher/stop":
             self._json(200, _terminate(WATCHER_PID))
 
+        elif path == "/api/jh/start":
+            self._json(200, _launch(JH_SCRIPT, JH_LOG, JH_PID))
+        elif path == "/api/jh/stop":
+            self._json(200, _terminate(JH_PID))
+        elif path == "/api/jh/settings":
+            data = self._body()
+            saves = {}
+            if data.get("cv_summary") is not None:
+                saves["job_hunter_cv_summary"] = data["cv_summary"]
+            if data.get("interval"):
+                saves["job_hunter_scan_interval_minutes"] = int(data["interval"])
+            if data.get("h_start") is not None:
+                saves["job_hunter_active_start_hour"] = int(data["h_start"])
+            if data.get("h_end") is not None:
+                saves["job_hunter_active_end_hour"] = int(data["h_end"])
+            config_loader.save(saves)
+            self._json(200, {"ok": True})
+
+        elif path == "/api/session/refresh-chrome":
+            try:
+                from services.extract_chrome_cookies import extract_and_update
+                ok = extract_and_update(verbose=False)
+                if ok:
+                    self._json(200, {"ok": True, "msg": "Session berhasil diperbarui dari Chrome. Restart bot untuk pakai cookies baru."})
+                else:
+                    self._json(200, {"ok": False, "msg": "Gagal ambil cookies dari Chrome. Pastikan sudah login Threads di Chrome Default profile."})
+            except Exception as e:
+                self._json(200, {"ok": False, "msg": f"Error: {e}"})
+
         elif path == "/api/li/commenter/start":
             self._json(200, _launch(LI_COMMENTER_SCRIPT, LI_COMMENTER_LOG, LI_COMMENTER_PID))
         elif path == "/api/li/commenter/stop":
@@ -2551,6 +2788,7 @@ if __name__ == "__main__":
         _terminate(BOT_PID)
         _terminate(POSTER_PID)
         _terminate(WATCHER_PID)
+        _terminate(JH_PID)
         _terminate(LI_COMMENTER_PID)
         _terminate(LI_POSTER_PID)
         _terminate(LI_WATCHER_PID)
