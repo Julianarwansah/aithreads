@@ -208,10 +208,11 @@ ATURAN KOMENTAR LAMARAN:
 {cv_hint}
 
 contoh BAGUS:
-"tertarik nih, gue dev 3 tahun mainly python + fastapi, lagi ngulik AI juga — boleh DM?"
-"interested! stack gue react + node, punya beberapa project SaaS. siap share portfolio"
-"wah pas banget, gue flutter dev 2 tahun, punya apps yang udah live di playstore"
-"gue bisa, fullstack (laravel + vue), biasanya solo project jadi ngerti dari BE sampe deploy"
+"tertarik nih, stack gue laravel + react, sekarang lagi kerja di startup — boleh DM?"
+"interested! gue fullstack (laravel + python), punya beberapa project yang udah live"
+"wah pas banget, gue flutter dev, punya apps di playstore + biasa integrasi API"
+"gue bisa, react + node.js, biasanya dari FE sampe deploy sendiri"
+"tertarik, gue dev python + laravel, lagi ngulik AI/LLM tools juga"
 
 contoh JELEK:
 "Halo kak, saya sangat tertarik dengan posisi ini. Saya memiliki pengalaman 3 tahun di bidang..."
@@ -237,34 +238,97 @@ contoh JELEK:
 
 
 def generate_dm_message(job_text: str, job_type: str) -> str:
-    cfg        = config_loader.load()
-    persona    = cfg.get("bot_persona", "developer Indonesia 3 tahun")
-    cv_summary = cfg.get("job_hunter_cv_summary", "dev ~3 tahun (python + js + react), ngulik AI")
+    """
+    Generate DM formal seperti cover letter, lengkap dengan portfolio & kontak.
+    File CV tidak bisa dikirim via text API — referensikan portfolio & tawarkan kirim CV.
+    """
+    cfg = config_loader.load()
+    cv_summary = cfg.get("job_hunter_cv_summary", "fullstack dev, laravel + react + python")
 
-    sys_prompt = f"""lo developer IT Indonesia yang DM recruiter soal lowongan yang mereka post.
-lo sudah komen di postnya, sekarang mau DM intro singkat.
+    PORTFOLIO_URL = "https://julianarwansah.github.io/portofolio_julian_arwansah"
+    PROJECT_URL   = "https://ai.kalosadigital.com"
+    EMAIL         = "julianarwansahh@gmail.com"
+    PHONE         = "+62 896-6177-0123"
 
-LATAR BELAKANG: {persona}
-SKILL SUMMARY: {cv_summary}
+    _SKILL_FOCUS = {
+        "frontend":  "React.js, Next.js, HTML/CSS, JavaScript",
+        "backend":   "PHP, Laravel, Python, Node.js, MySQL, REST API",
+        "fullstack": "PHP/Laravel, React.js, Node.js, Flutter, MySQL",
+        "mobile":    "Flutter, React Native, mobile app development",
+        "ai":        "Python, LLM tools, AI/ML pipeline, FastAPI",
+        "devops":    "Python, Node.js, CI/CD, deployment, Linux",
+        "general":   "PHP/Laravel, React.js, Node.js, Flutter, MySQL",
+    }
+    skill_focus = _SKILL_FOCUS.get(job_type, _SKILL_FOCUS["general"])
 
-ATURAN DM:
-- 2-3 kalimat, natural, santai tapi sopan
-- Sebutkan kamu lihat dari Threads
-- Highlight 1-2 skill paling relevan
-- Tutup dengan "available buat ngobrol lebih lanjut" atau semacamnya
-- JANGAN: terlalu formal, terlalu panjang, template copy-paste
-- JANGAN: link, hashtag"""
+    sys_prompt = f"""Kamu membantu Julian Arwansah menulis DM lamaran kerja via Threads/Instagram DM.
 
-    user_prompt = f"Lowongan ini:\n{job_text[:300]}\n\nTulis DM singkat intro:"
+PENTING — BACA LOWONGANNYA DULU:
+Sebelum menulis, baca baik-baik isi lowongan. Perhatikan:
+- Posisi apa yang dibuka (sebutkan nama posisinya di DM, jangan generik "lowongan tersebut")
+- Tech stack / requirement spesifik yang mereka sebut → cocokkan dengan skill Julian
+- Tone si poster: kalau kasual tulis sedikit lebih santai, kalau formal tulis lebih formal
+- Kalau poster sebut kebutuhan spesifik (misal "butuh yang bisa laravel + vue"), sebut di DM bahwa Julian bisa itu
+
+DATA PELAMAR:
+- Nama: Julian Arwansah
+- Status: Fullstack Developer, kuliah Informatika semester 6 sambil kerja aktif
+- Pengalaman: Full Stack Dev & IT Support di PT Jarwinn Felicity Hotapea (Okt 2025–sekarang), Internship Backend PT Moemtaz Grub (Mar–Jun 2025)
+- Skill relevan ({job_type}): {skill_focus}
+- Skill lengkap: {cv_summary}
+
+STRUKTUR DM (tulis mengalir, tanpa heading/nomor):
+1. Salam hangat + sebut nama posisi dan bahwa lihat dari Threads
+2. Perkenalan nama + posisi saat ini (1 kalimat ringkas)
+3. Pengalaman & skill yang paling nyambung dengan kebutuhan mereka — spesifik, bukan generik
+4. Tunjukkan antusias yang genuine terhadap posisi/perusahaan mereka (1 kalimat)
+5. Arahkan ke portfolio untuk melihat hasil kerja
+6. Tutup ramah, undang mereka untuk diskusi lebih lanjut
+7. Footer kontak (format persis di bawah)
+
+FOOTER WAJIB (akhiri dengan ini persis, tanpa perubahan):
+Portfolio: {PORTFOLIO_URL}
+Project: {PROJECT_URL}
+Kontak: {PHONE} / {EMAIL}
+
+GAYA BAHASA:
+- Ramah dan hangat, bukan kaku seperti surat dinas
+- Sopan tapi tidak lebay atau basa-basi panjang
+- Bahasa Indonesia natural, boleh mix istilah teknis Inggris
+- Kalau poster pakai bahasa santai/gaul, boleh sedikit menyesuaikan (tapi tetap sopan)
+
+PANJANG: 130-220 kata
+JANGAN: "Dear Hiring Manager", "Dengan hormat", kalimat copy-paste template, emoji berlebihan, sebut "lowongan tersebut" tanpa menyebut nama posisinya"""
+
+    user_prompt = f"Post lowongan:\n\n{job_text[:500]}\n\nTulis DM lamaran yang ramah, sopan, dan relevan dengan isi post di atas:"
 
     try:
         raw = llm_router.generate(user_prompt, system_prompt=sys_prompt)
         msg = raw.strip().strip('"').strip("'")
-        if msg and len(msg) <= 500:
+        # Footer harus ada — kalau LLM tidak sertakan, tambahkan manual
+        footer = (
+            f"\nPortfolio: {PORTFOLIO_URL}\n"
+            f"Project: {PROJECT_URL}\n"
+            f"Kontak: {PHONE} / {EMAIL}"
+        )
+        if PORTFOLIO_URL not in msg:
+            msg = msg + "\n\n" + footer.strip()
+        if msg and len(msg) >= 100:
             return msg
     except Exception as e:
         stats_tracker.log_error(f"[JH] DM LLM error: {e}")
-    return ""
+
+    # Fallback template lengkap
+    return (
+        f"Halo, saya Julian Arwansah. Saya melihat lowongan ini di Threads dan tertarik untuk melamar.\n\n"
+        f"Saat ini saya bekerja sebagai Full Stack Developer & IT Support di PT Jarwinn Felicity Hotapea, "
+        f"sambil menyelesaikan kuliah Informatika semester 6.\n\n"
+        f"Saya memiliki pengalaman dalam {skill_focus} — mulai dari development, integrasi API, "
+        f"hingga deployment. Sebelumnya juga pernah internship Backend di PT Moemtaz Grub.\n\n"
+        f"Portfolio: {PORTFOLIO_URL}\n"
+        f"Project: {PROJECT_URL}\n"
+        f"Kontak: {PHONE} / {EMAIL}"
+    )
 
 
 # ── DM sender ─────────────────────────────────────────────────────────────────
@@ -374,11 +438,85 @@ def send_comment(session, post_id: str, text: str) -> Optional[str]:
     return None
 
 
+# ── multi-page timeline fetcher ───────────────────────────────────────────────
+
+def fetch_all_timeline_posts(session, tokens: dict, query_config: dict, max_pages: int = 8) -> List[Dict]:
+    """
+    Fetch hingga max_pages halaman timeline via pagination.
+    Return list semua post yang ditemukan (dedup by post_id).
+    """
+    from auto_commenter import GRAPHQL_URL, BASE_HEADERS, extract_posts
+    import io, contextlib
+
+    all_posts: List[Dict] = []
+    seen_ids: set = set()
+    cursor: Optional[str] = None
+    base_vars = json.loads(query_config["variables"])
+    friendly  = query_config.get("friendly_name", "BarcelonaFeedDirectQuery")
+
+    for page in range(max_pages):
+        vars_copy = {k: v for k, v in base_vars.items()}
+        if cursor:
+            vars_copy["after"] = cursor
+            vars_copy.setdefault("data", {})["reason"] = "pagination"
+        else:
+            vars_copy.get("data", {})  # first page uses existing reason
+
+        headers = dict(BASE_HEADERS)
+        headers["x-fb-friendly-name"] = friendly
+        csrf = session.cookies.get("csrftoken")
+        if csrf: headers["x-csrftoken"] = csrf
+
+        payload = urlencode({
+            "lsd":                      tokens.get("lsd", ""),
+            "fb_dtsg":                  tokens.get("fb_dtsg", ""),
+            "doc_id":                   query_config["doc_id"],
+            "variables":                json.dumps(vars_copy),
+            "server_timestamps":        "true",
+            "fb_api_req_friendly_name": friendly,
+        })
+
+        try:
+            resp = session.post(GRAPHQL_URL, data=payload, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(f"[JH] page {page+1}: HTTP {resp.status_code}, stop pagination")
+                break
+            raw = resp.json()
+        except Exception as e:
+            logger.warning(f"[JH] page {page+1}: fetch error {e}")
+            break
+
+        # Extract posts (suppress noisy per-post debug prints)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            page_posts = extract_posts(raw)
+
+        new = [p for p in page_posts if str(p.get("post_id","")) not in seen_ids]
+        for p in new:
+            seen_ids.add(str(p.get("post_id", "")))
+        all_posts.extend(new)
+
+        # Ambil cursor halaman berikutnya
+        feed_data = (raw.get("data") or {}).get("feedData") or \
+                    ((raw.get("data") or {}).get("viewer") or {}).get("home_feed_units", {})
+        page_info = (feed_data or {}).get("page_info", {}) if isinstance(feed_data, dict) else {}
+        cursor = page_info.get("end_cursor")
+
+        logger.info(f"[JH] page {page+1}: {len(new)} post baru (total {len(all_posts)}), has_next={page_info.get('has_next_page', False)}")
+
+        if not cursor or not page_info.get("has_next_page"):
+            break
+
+        time.sleep(random.uniform(1.5, 3))  # jeda antar halaman
+
+    return all_posts
+
+
 # ── main cycle ─────────────────────────────────────────────────────────────────
 
 def run_once(session) -> int:
     """
-    Satu siklus: fetch timeline → temukan lowongan IT → lamar.
+    Satu siklus: scan timeline (multi-page) → temukan lowongan IT → lamar.
     Return jumlah lamaran yang dikirim.
     """
     query_config = load_latest_query_config()
@@ -387,19 +525,14 @@ def run_once(session) -> int:
         logger.warning("[JH] Gagal dapat tokens, skip siklus ini")
         return 0
 
-    raw = fetch_timeline(session, tokens, query_config)
-    if not raw:
-        logger.warning("[JH] Timeline kosong, skip")
-        return 0
+    cfg       = config_loader.load()
+    max_pages = int(cfg.get("job_hunter_scan_pages", 8))
 
-    # Parse posts dari raw GraphQL response
-    from auto_commenter import extract_posts
-    posts = extract_posts(raw)
+    posts = fetch_all_timeline_posts(session, tokens, query_config, max_pages=max_pages)
     if not posts:
         logger.info("[JH] Tidak ada post di timeline")
         return 0
 
-    cfg          = config_loader.load()
     blacklist    = [u.lower() for u in (cfg.get("blacklisted_accounts") or [])]
     applied_count = 0
 

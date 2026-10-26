@@ -1,0 +1,50 @@
+[INFO] [SESSION] Loading session...
+[INFO] [SESSION] Loaded from environment variables
+[INFO] [SESSION] Injected 5 cookies into session (3 domains)
+[INFO] [SESSION] Validating session via Threads.net...
+[INFO] 
+============================================================
+[INFO] THREADS SESSION VALIDATOR (BYPASS MODE)
+[INFO] ============================================================
+[INFO] [DEBUG] sessionid found in environment.
+[INFO] [DEBUG] -> VALID: Bypassing HTML check (Playwright will verify)
+[INFO] [SESSION] VALID (Threads)
+[INFO] [SESSION] Injected 5 cookies into session (3 domains)
+[INFO] [JH] Job Hunter mulai — scan setiap 45 menit, jam 08–21
+
+[INFO] Menggunakan fallback GraphQL config bawaan (Default).
+[INFO] [JH] page 1: 4 post baru (total 4), has_next=True
+[INFO] [JH] page 2: 7 post baru (total 11), has_next=True
+[INFO] [JH] page 3: 7 post baru (total 18), has_next=True
+[INFO] [JH] page 4: 7 post baru (total 25), has_next=True
+[INFO] [JH] page 5: 7 post baru (total 32), has_next=True
+[INFO] [JH] page 6: 7 post baru (total 39), has_next=True
+[INFO] [JH] page 7: 7 post baru (total 46), has_next=True
+[INFO] [JH] page 8: 7 post baru (total 53), has_next=True
+[INFO] [JH] 53 post di timeline, scan lowongan…
+[INFO] 
+[JH] LOWONGAN DITEMUKAN dari @ndutzdaddy (general)
+[INFO]   Post: Emang kalau nggak punya ijazah IT, nggak boleh bikin aplikasi? Wkwk.
+
+Gue nggak kuliah IT, tapi tahu…
+[INFO]   wants_dm=False, cv_req=None
+[INFO]   [JH] KOMENTAR: relate banget, gue fullstack (laravel + react) dan sekarang juga ngulik AI buat bikin tools internal — yang penting kan problemnya solved, bukan ijazahnya
+[INFO]   [JH] Komentar terkirim ✓ (id=4016299102748741538)
+[INFO]   [JH] Jeda 62d sebelum post berikutnya…
+[INFO] 
+[JH] LOWONGAN DITEMUKAN dari @itskodeka (general)
+[INFO]   Post: Vibe Coder/Coding,
+Seharusnya akan suka dengan salah satu AI skill ini, dimana setiap implementasi t…
+[INFO]   wants_dm=False, cv_req=None
+[INFO]   [JH] KOMENTAR: tertarik! gue dev python + js, sekarang lagi ngulik AI agent workflow dan bikin docs per domain biar konteks codebase nggak hilang tiap iterasi
+[INFO]   [JH] Komentar terkirim ✓ (id=4016299933128693556)
+[INFO]   [JH] Jeda 89d sebelum post berikutnya…
+[INFO] 
+[JH] LOWONGAN DITEMUKAN dari @bangoyan25_ (general)
+[INFO]   Post: kalo bikin platform belajar coding gitu keknya di era sekarang ga kepake yah?? ato masi pada butuh, …
+[INFO]   wants_dm=False, cv_req=None
+[INFO]   [JH] KOMENTAR: masih butuh kok, apalagi yang gamified biar ga bosen — gue fullstack laravel + react, biasa bikin platform dari FE sampe deploy. interested!
+[INFO]   [JH] Komentar terkirim ✓ (id=4016300959558757282)
+[INFO]   [JH] Jeda 88d sebelum post berikutnya…
+[INFO] [JH] Siklus selesai — 3 lamaran dikirim
+[INFO] [JH] Tidur 45 menit…

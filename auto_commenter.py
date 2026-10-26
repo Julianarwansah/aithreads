@@ -911,7 +911,8 @@ def extract_posts(json_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     edges = feed_data.get("edges", []) if isinstance(feed_data, dict) else []
     for edge in edges:
-        items = (edge.get("node") or {}).get("text_post_app_thread", {}).get("thread_items", [])
+        if not isinstance(edge, dict): continue
+        items = ((edge.get("node") or {}).get("text_post_app_thread") or {}).get("thread_items", [])
         if not items: continue
         post = items[0].get("post") or {}
         

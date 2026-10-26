@@ -1,0 +1,41 @@
+{
+  "4015896009557331353": {
+    "ts": 1793000187.659282,
+    "date": "2026-10-26 14:36",
+    "username": "ndutzdaddy",
+    "user_id": "",
+    "caption": "Emang kalau nggak punya ijazah IT, nggak boleh bikin aplikasi? Wkwk.\n\nGue nggak kuliah IT, tapi tahun 2011 pernah jadi staf IT di kantor sambil merangkap admin. Sejak 2017, gue fokus di administrasi.\n\nIlmu IT gue murni otodidak dan hasil pengalaman kerja.\n\nSekarang gue mulai bikin aplikasi dibantu A",
+    "job_type": "general",
+    "comment_id": "4016299102748741538",
+    "comment": "relate banget, gue fullstack (laravel + react) dan sekarang juga ngulik AI buat bikin tools internal — yang penting kan problemnya solved, bukan ijazahnya",
+    "dm_sent": false,
+    "dm_id": null,
+    "status": "applied"
+  },
+  "4016271512886075600": {
+    "ts": 1793000286.61702,
+    "date": "2026-10-26 14:38",
+    "username": "itskodeka",
+    "user_id": "",
+    "caption": "Vibe Coder/Coding,\nSeharusnya akan suka dengan salah satu AI skill ini, dimana setiap implementasi timeline akan dibuatkan semacam docs/catatan penerapan yang dilakukan terhadap project terkait.\nSetiap domain project, docs-nya juga nanti terpisah.\n\nIni cocok banget, untuk kebutuhan 'codebase-memory'",
+    "job_type": "general",
+    "comment_id": "4016299933128693556",
+    "comment": "tertarik! gue dev python + js, sekarang lagi ngulik AI agent workflow dan bikin docs per domain biar konteks codebase nggak hilang tiap iterasi",
+    "dm_sent": false,
+    "dm_id": null,
+    "status": "applied"
+  },
+  "4016156956293206030": {
+    "ts": 1793000409.327768,
+    "date": "2026-10-26 14:40",
+    "username": "bangoyan25_",
+    "user_id": "",
+    "caption": "kalo bikin platform belajar coding gitu keknya di era sekarang ga kepake yah?? ato masi pada butuh, systemnya mirip game gitu ada level levelnya buat ngerjain codingan sesuai soal/perintah dan ada leaderboardnya gitu",
+    "job_type": "general",
+    "comment_id": "4016300959558757282",
+    "comment": "masih butuh kok, apalagi yang gamified biar ga bosen — gue fullstack laravel + react, biasa bikin platform dari FE sampe deploy. interested!",
+    "dm_sent": false,
+    "dm_id": null,
+    "status": "applied"
+  }
+}

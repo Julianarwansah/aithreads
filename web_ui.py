@@ -397,6 +397,7 @@ def _get_jh_status() -> dict:
         "total_found":           total_found,
         "cv_summary":            cfg.get("job_hunter_cv_summary", ""),
         "interval":              cfg.get("job_hunter_scan_interval_minutes", 45),
+        "scan_pages":            cfg.get("job_hunter_scan_pages", 8),
         "h_start":               cfg.get("job_hunter_active_start_hour", 8),
         "h_end":                 cfg.get("job_hunter_active_end_hour", 21),
     }
@@ -622,12 +623,58 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 
 /* scrollbar */
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--brd);border-radius:3px}
+
+/* hamburger (mobile only) */
+.hamburger{display:none;background:none;border:none;cursor:pointer;color:var(--txt);padding:6px;flex-shrink:0;align-items:center;justify-content:center}
+.nav-overlay{display:none;position:fixed;inset:0;top:48px;background:rgba(0,0,0,.55);z-index:49}
+.nav-overlay.open{display:block}
+
+/* table scroll wrapper */
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* responsive */
+@media(max-width:860px){
+  .grid4{grid-template-columns:repeat(2,1fr)}
+  .grid3{grid-template-columns:1fr 1fr}
+}
+@media(max-width:768px){
+  .hamburger{display:inline-flex}
+  nav{
+    position:fixed;left:-220px;top:48px;bottom:0;z-index:50;
+    transition:left .22s ease;overflow-y:auto;width:196px
+  }
+  nav.open{left:0;box-shadow:4px 0 20px rgba(0,0,0,.5)}
+  .layout{overflow:visible}
+  body{overflow:hidden}
+  .grid4{grid-template-columns:1fr 1fr}
+  .grid2,.grid3{grid-template-columns:1fr}
+  .set-layout{grid-template-columns:1fr;overflow:auto}
+  .set-nav{border-right:none;border-bottom:1px solid var(--brd);flex-direction:row;flex-wrap:wrap;padding:6px 8px;gap:2px;overflow-x:auto}
+  .set-content{padding:14px}
+  .frow{grid-template-columns:1fr}
+  .page-body{padding:12px;gap:12px}
+  .topbar-schedule,.topbar-time{display:none}
+  .topbar-right{gap:8px}
+  #session-warn span{display:none}
+}
+@media(max-width:480px){
+  .topbar{padding:0 10px;gap:8px}
+  .logo{font-size:14px}
+  .page-body{padding:10px;gap:10px}
+  .grid4{grid-template-columns:1fr 1fr}
+  .stat-card{padding:10px 12px}
+  .stat-card .num{font-size:22px}
+  .modal-box{padding:14px}
+}
 </style>
 </head>
 <body>
 
 <!-- topbar -->
 <div class="topbar">
+  <button class="hamburger" onclick="toggleNav()" aria-label="Menu">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
   <div class="logo">Thread<em>Scope</em></div>
   <div class="badge off" id="top-badge"><div class="dot off" id="top-dot"></div><span id="top-txt">Stopped</span></div>
   <div class="badge off" id="poster-badge" style="display:none"><div class="dot off" id="poster-dot"></div><span id="poster-txt">Poster</span></div>
@@ -643,6 +690,7 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   </div>
 </div>
 
+<div id="nav-overlay" class="nav-overlay" onclick="toggleNav()"></div>
 <div class="layout">
 <!-- nav -->
 <nav>
@@ -1239,8 +1287,9 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
     <label>Ringkasan skill / CV kamu (dipakai AI untuk buat komentar lamaran)</label>
     <textarea id="jh-cv" rows="3" placeholder="contoh: dev ~3 tahun (python + js + react), pernah bikin SaaS kecil, ngulik AI/LLM"></textarea>
   </div>
-  <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+  <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
     <div><label>Interval Scan (menit)</label><input type="number" id="jh-interval" min="15" max="180" value="45"></div>
+    <div><label>Halaman per Scan</label><input type="number" id="jh-pages" min="1" max="20" value="8" title="Lebih banyak halaman = lebih banyak post yang di-scan per siklus"></div>
     <div><label>Jam Aktif</label>
       <div style="display:flex;gap:6px;align-items:center">
         <input type="number" id="jh-hstart" min="0" max="23" value="8" style="width:60px">
@@ -1728,7 +1777,7 @@ async function loadGrowth(){
     // table with comments correlation
     const tbl=document.getElementById('g-table');
     if(!hist.length){tbl.innerHTML='<div style="color:var(--muted)">Belum ada data.</div>';return;}
-    tbl.innerHTML='<table style="width:100%;border-collapse:collapse">'
+    tbl.innerHTML='<div class="tbl-scroll"><table style="width:100%;border-collapse:collapse">'
       +'<tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px"><td style="padding:4px 8px">Tanggal</td><td style="padding:4px 8px;text-align:right">Followers</td><td style="padding:4px 8px;text-align:right">±</td><td style="padding:4px 8px;text-align:right">Komentar</td></tr>'
       +[...hist].reverse().map((h,i,a)=>{
         const prev=a[i+1];
@@ -1736,7 +1785,7 @@ async function loadGrowth(){
         const dc=df>0?'var(--green)':df<0?'var(--red)':'var(--muted)';
         const cmtCol=h.comments>0?`<span style="color:var(--purple)">${h.comments}</span>`:'<span style="color:var(--muted2)">—</span>';
         return `<tr style="border-top:1px solid var(--brd2)"><td style="padding:5px 8px;font-size:12px">${h.date}</td><td style="padding:5px 8px;text-align:right;font-weight:600">${h.followers}</td><td style="padding:5px 8px;text-align:right;color:${dc};font-weight:600">${df>0?'+':''}${df||'—'}</td><td style="padding:5px 8px;text-align:right">${cmtCol}</td></tr>`;
-      }).join('')+'</table>';
+      }).join('')+'</table></div>';
   }catch(e){}
 }
 
@@ -2161,6 +2210,7 @@ async function loadJhStatus(){
     // Populate settings
     if(d.cv_summary !== undefined) document.getElementById('jh-cv').value        = d.cv_summary;
     if(d.interval   !== undefined) document.getElementById('jh-interval').value  = d.interval;
+    if(d.scan_pages !== undefined) document.getElementById('jh-pages').value     = d.scan_pages;
     if(d.h_start    !== undefined) document.getElementById('jh-hstart').value    = d.h_start;
     if(d.h_end      !== undefined) document.getElementById('jh-hend').value      = d.h_end;
   } catch(e){ console.error('jh status', e); }
@@ -2174,6 +2224,7 @@ async function saveJhSettings(){
   const payload = {
     cv_summary: document.getElementById('jh-cv').value.trim(),
     interval:   parseInt(document.getElementById('jh-interval').value),
+    scan_pages: parseInt(document.getElementById('jh-pages').value),
     h_start:    parseInt(document.getElementById('jh-hstart').value),
     h_end:      parseInt(document.getElementById('jh-hend').value),
   };
@@ -2191,7 +2242,7 @@ async function loadJhApplications(){
   try {
     const apps = await (await fetch('/api/jh/applications')).json();
     if(!apps.length){ el.innerHTML='<div style="color:var(--muted);padding:12px">Belum ada lamaran.</div>'; return; }
-    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    el.innerHTML = `<div class="tbl-scroll"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="color:var(--muted);border-bottom:1px solid var(--bdr)">
         <th style="text-align:left;padding:6px 4px">Tanggal</th>
         <th style="text-align:left;padding:6px 4px">Akun</th>
@@ -2206,16 +2257,27 @@ async function loadJhApplications(){
         <td style="padding:6px 4px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(a.comment||'').replace(/"/g,'&quot;')}">${a.comment||''}</td>
         <td style="padding:6px 4px;text-align:center">${a.dm_sent?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--muted)">–</span>'}</td>
       </tr>`).join('')}</tbody>
-    </table>`;
+    </table></div>`;
   } catch(e){ el.innerHTML='<div style="color:var(--red)">Gagal memuat.</div>'; }
 }
 
 // ── page nav with data loading ───────────────────────────────────────────
+function toggleNav(){
+  const nav=document.querySelector('nav');
+  const ov=document.getElementById('nav-overlay');
+  nav.classList.toggle('open');
+  ov.classList.toggle('open');
+}
 function goPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('page-'+id).classList.add('active');
   document.getElementById('nav-'+id).classList.add('active');
+  // close mobile nav on page switch
+  if(window.innerWidth<=768){
+    document.querySelector('nav').classList.remove('open');
+    document.getElementById('nav-overlay').classList.remove('open');
+  }
   if(id==='cmt')loadComments();
   if(id==='set')loadSettings();
   if(id==='poster')loadPosterPosts();
@@ -2662,6 +2724,8 @@ class Handler(BaseHTTPRequestHandler):
                 saves["job_hunter_cv_summary"] = data["cv_summary"]
             if data.get("interval"):
                 saves["job_hunter_scan_interval_minutes"] = int(data["interval"])
+            if data.get("scan_pages"):
+                saves["job_hunter_scan_pages"] = max(1, min(20, int(data["scan_pages"])))
             if data.get("h_start") is not None:
                 saves["job_hunter_active_start_hour"] = int(data["h_start"])
             if data.get("h_end") is not None:
