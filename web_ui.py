@@ -25,6 +25,17 @@ WATCHER_LOG    = os.path.join(_DIR, "watcher_output.log")
 BOT_PID        = os.path.join(_DIR, "bot.pid")
 POSTER_PID     = os.path.join(_DIR, "poster.pid")
 WATCHER_PID    = os.path.join(_DIR, "watcher.pid")
+
+LI_COMMENTER_SCRIPT  = os.path.join(_DIR, "linkedin_commenter.py")
+LI_POSTER_SCRIPT     = os.path.join(_DIR, "linkedin_poster.py")
+LI_WATCHER_SCRIPT    = os.path.join(_DIR, "linkedin_reply_watcher.py")
+LI_COMMENTER_LOG     = os.path.join(_DIR, "linkedin_bot.log")
+LI_POSTER_LOG        = os.path.join(_DIR, "linkedin_poster.log")
+LI_WATCHER_LOG       = os.path.join(_DIR, "linkedin_watcher.log")
+LI_COMMENTER_PID     = os.path.join(_DIR, "linkedin_bot.pid")
+LI_POSTER_PID        = os.path.join(_DIR, "linkedin_poster.pid")
+LI_WATCHER_PID       = os.path.join(_DIR, "linkedin_watcher.pid")
+
 PORT           = int(os.getenv("UI_PORT", "5000"))
 
 # ── process helpers ──────────────────────────────────────────────────────────
@@ -339,6 +350,24 @@ def _get_watcher_stats() -> dict:
     }
 
 
+def _get_li_stats() -> dict:
+    """Statistik LinkedIn dari stats.json (prefix li_) dan log files."""
+    sp = os.path.join(_DIR, "stats.json")
+    try:
+        s = json.loads(Path(sp).read_text(encoding="utf-8")) if os.path.exists(sp) else {}
+    except Exception:
+        s = {}
+    return {
+        "commenter_running": _is_alive(LI_COMMENTER_PID),
+        "poster_running":    _is_alive(LI_POSTER_PID),
+        "watcher_running":   _is_alive(LI_WATCHER_PID),
+        "comments_sent":     s.get("li_comments_sent", 0),
+        "posts_sent":        s.get("li_posts_sent", 0),
+        "replies_sent":      s.get("li_replies_sent", 0),
+        "errors":            s.get("li_errors", 0),
+    }
+
+
 def _get_poster_posts():
     """Ambil riwayat postingan dari poster_output.log."""
     posts = []
@@ -588,6 +617,10 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   </button>
   <button class="nav-item" onclick="goPage('bl')" id="nav-bl">
     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Blacklist
+  </button>
+  <div class="nav-sep"></div>
+  <button class="nav-item" onclick="goPage('li')" id="nav-li">
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 8a6 6 0 016 6v7h-4v-7a2 2 0 00-2-2 2 2 0 00-2 2v7h-4v-7a6 6 0 016-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>LinkedIn
   </button>
   <div class="nav-sep"></div>
   <button class="nav-item" onclick="goPage('set')" id="nav-set">
@@ -1118,6 +1151,71 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       Klik username di bawah untuk langsung blacklist akun yang sudah pernah dikomentari.
     </div>
     <div id="bl-auto-list" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px"></div>
+  </div>
+
+</div></div>
+
+<!-- ════════════════════════════ LINKEDIN ════════════════════════════════════ -->
+<div class="page" id="page-li">
+<div class="page-body">
+
+  <div class="card">
+    <div class="card-hdr">LinkedIn — Session</div>
+    <div class="form-row" style="margin-bottom:10px">
+      <label>Cookie <code>li_at</code> (dari DevTools → Application → Cookies)</label>
+      <input type="password" id="li-at-inp" class="fi" placeholder="AQE..." autocomplete="off">
+    </div>
+    <div class="form-row" style="margin-bottom:10px">
+      <label>Cookie <code>JSESSIONID</code> (untuk csrf-token)</label>
+      <input type="password" id="li-jsession-inp" class="fi" placeholder="ajax:..." autocomplete="off">
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-blue" onclick="saveLiSession()">💾 Simpan Session</button>
+    </div>
+    <div class="hint" style="margin-top:8px">Login LinkedIn → F12 → Application → Cookies → www.linkedin.com → copy nilai <code>li_at</code> dan <code>JSESSIONID</code>.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">LinkedIn — Kontrol Bot</div>
+    <div class="btn-row" style="margin-bottom:10px">
+      <button class="btn btn-green" id="li-comm-start" onclick="liAction('commenter','start')">▶ Commenter</button>
+      <button class="btn btn-red"   id="li-comm-stop"  onclick="liAction('commenter','stop')" disabled>■ Stop Commenter</button>
+    </div>
+    <div class="btn-row" style="margin-bottom:10px">
+      <button class="btn btn-green" id="li-post-start" onclick="liAction('poster','start')" style="background:var(--teal)">▶ Poster</button>
+      <button class="btn btn-red"   id="li-post-stop"  onclick="liAction('poster','stop')" disabled>■ Stop Poster</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-green" id="li-watch-start" onclick="liAction('watcher','start')" style="background:var(--blue)">▶ Reply Watcher</button>
+      <button class="btn btn-red"   id="li-watch-stop"  onclick="liAction('watcher','stop')" disabled>■ Stop Watcher</button>
+    </div>
+  </div>
+
+  <div class="grid4">
+    <div class="stat-card"><div class="lbl">Komentar Terkirim</div><div class="num g" id="li-s-sent">—</div></div>
+    <div class="stat-card"><div class="lbl">Post Dibuat</div><div class="num p" id="li-s-posts">—</div></div>
+    <div class="stat-card"><div class="lbl">Balasan Dikirim</div><div class="num b" id="li-s-replies">—</div></div>
+    <div class="stat-card"><div class="lbl">Error</div><div class="num r" id="li-s-errors">—</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Status Runtime LinkedIn</div>
+    <div class="row"><span class="k">Commenter</span><span class="v" id="li-d-comm" style="color:var(--red)">Stopped</span></div>
+    <div class="row"><span class="k">Poster</span><span class="v" id="li-d-post" style="color:var(--muted)">Stopped</span></div>
+    <div class="row"><span class="k">Reply Watcher</span><span class="v" id="li-d-watch" style="color:var(--muted)">Stopped</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">Live Log LinkedIn
+      <div style="display:flex;gap:6px">
+        <span class="fchip" id="li-log-comm" onclick="switchLiLog('commenter')">Commenter</span>
+        <span class="fchip" id="li-log-post" onclick="switchLiLog('poster')">Poster</span>
+        <span class="fchip" id="li-log-watch" onclick="switchLiLog('watcher')">Watcher</span>
+      </div>
+    </div>
+    <div id="li-term" style="height:260px;overflow-y:auto;padding:10px;font-family:monospace;font-size:12px;background:#0a0e14;border-radius:6px;line-height:1.6">
+      <div style="color:var(--muted)">Pilih sumber log di atas lalu klik Start untuk melihat output.</div>
+    </div>
   </div>
 
 </div></div>
@@ -1924,6 +2022,7 @@ function goPage(id){
   if(id==='growth'){loadGrowth();}
   if(id==='analytics'){loadAnalytics();}
   if(id==='bl'){loadBlacklist();loadAutoBlacklist();}
+  if(id==='li'){loadLiStatus();}
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
@@ -1937,6 +2036,59 @@ function goPage(id){
     }
   }catch(e){}
 })();
+
+// ── LinkedIn ─────────────────────────────────────────────────────────────────
+let _liLogSource=null;
+async function loadLiStatus(){
+  try{
+    const d=await(await fetch('/api/li/status')).json();
+    const st=(run,id)=>{ const el=document.getElementById(id); if(!el)return;
+      el.textContent=run?'Running':'Stopped'; el.style.color=run?'var(--green)':'var(--red)'; };
+    st(d.commenter_running,'li-d-comm');
+    st(d.poster_running,'li-d-post');
+    st(d.watcher_running,'li-d-watch');
+    rv('li-s-sent',    d.comments_sent??'—');
+    rv('li-s-posts',   d.posts_sent??'—');
+    rv('li-s-replies', d.replies_sent??'—');
+    rv('li-s-errors',  d.errors??'—');
+    const setBtn=(startId,stopId,running)=>{
+      const s=document.getElementById(startId), t=document.getElementById(stopId);
+      if(!s||!t) return;
+      s.disabled=running; t.disabled=!running;
+    };
+    setBtn('li-comm-start','li-comm-stop',d.commenter_running);
+    setBtn('li-post-start','li-post-stop',d.poster_running);
+    setBtn('li-watch-start','li-watch-stop',d.watcher_running);
+  }catch(e){}
+}
+async function liAction(proc,action){
+  const d=await(await fetch('/api/li/'+proc+'/'+action,{method:'POST'})).json();
+  toast(d.ok?`LinkedIn ${proc} ${action==='start'?'dimulai':'dihentikan'}`:d.msg||'Gagal', d.ok?'ok':'err');
+  setTimeout(loadLiStatus,1000);
+}
+async function saveLiSession(){
+  const li_at=document.getElementById('li-at-inp').value.trim();
+  const jsessionid=document.getElementById('li-jsession-inp').value.trim();
+  if(!li_at){toast('li_at wajib diisi','err');return;}
+  const d=await(await fetch('/api/li/session',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({li_at,jsessionid})})).json();
+  toast(d.ok?'Session disimpan!':d.msg||'Gagal',d.ok?'ok':'err');
+  if(d.ok){document.getElementById('li-at-inp').value='';document.getElementById('li-jsession-inp').value='';}
+}
+let _liLogSrc=null, _liLogCur='commenter';
+async function switchLiLog(source){
+  _liLogCur=source;
+  ['commenter','poster','watcher'].forEach(s=>{
+    const el=document.getElementById('li-log-'+s);
+    if(el) el.classList.toggle('on',s===source);
+  });
+  const d=await(await fetch('/api/li/logs?source='+source)).json();
+  const term=document.getElementById('li-term');
+  if(!term) return;
+  term.innerHTML=(d.lines||[]).map(l=>`<div class="ln">${l.replace(/</g,'&lt;')}</div>`).join('');
+  term.scrollTop=term.scrollHeight;
+}
 
 connectSSE();
 pollStatus();loadComments();loadChart();
@@ -2155,6 +2307,26 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/watcher/stats":
             self._json(200, _get_watcher_stats())
 
+        elif path == "/api/li/status":
+            self._json(200, _get_li_stats())
+
+        elif path == "/api/li/logs":
+            qs     = parse_qs(urlparse(self.path).query)
+            source = qs.get("source", ["commenter"])[0]
+            log_map = {
+                "commenter": LI_COMMENTER_LOG,
+                "poster":    LI_POSTER_LOG,
+                "watcher":   LI_WATCHER_LOG,
+            }
+            logfile = log_map.get(source, LI_COMMENTER_LOG)
+            lines   = []
+            try:
+                with open(logfile, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()[-200:]
+            except FileNotFoundError:
+                pass
+            self._json(200, {"lines": [l.rstrip("\n") for l in lines]})
+
         elif path == "/api/accounts":
             statuses = [_get_default_account_status()]
             statuses += [_get_account_full_status(a["name"]) for a in account_manager.list_accounts()]
@@ -2271,6 +2443,40 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/watcher/stop":
             self._json(200, _terminate(WATCHER_PID))
 
+        elif path == "/api/li/commenter/start":
+            self._json(200, _launch(LI_COMMENTER_SCRIPT, LI_COMMENTER_LOG, LI_COMMENTER_PID))
+        elif path == "/api/li/commenter/stop":
+            self._json(200, _terminate(LI_COMMENTER_PID))
+        elif path == "/api/li/poster/start":
+            result = _launch(LI_POSTER_SCRIPT, LI_POSTER_LOG, LI_POSTER_PID)
+            if result.get("ok"):
+                config_loader.save({"linkedin_poster_enabled": True})
+            self._json(200, result)
+        elif path == "/api/li/poster/stop":
+            config_loader.save({"linkedin_poster_enabled": False})
+            self._json(200, _terminate(LI_POSTER_PID))
+        elif path == "/api/li/watcher/start":
+            self._json(200, _launch(LI_WATCHER_SCRIPT, LI_WATCHER_LOG, LI_WATCHER_PID))
+        elif path == "/api/li/watcher/stop":
+            self._json(200, _terminate(LI_WATCHER_PID))
+
+        elif path == "/api/li/session":
+            data       = self._body()
+            li_at      = (data.get("li_at") or "").strip()
+            jsessionid = (data.get("jsessionid") or "").strip()
+            if not li_at:
+                self._json(200, {"ok": False, "msg": "li_at wajib diisi"})
+            else:
+                li_session = {"li_at": li_at}
+                if jsessionid:
+                    li_session["JSESSIONID"] = jsessionid
+                sp = os.path.join(_DIR, "linkedin_session.json")
+                try:
+                    Path(sp).write_text(json.dumps(li_session, indent=2), encoding="utf-8")
+                    self._json(200, {"ok": True})
+                except Exception as e:
+                    self._json(200, {"ok": False, "msg": str(e)})
+
         elif path == "/api/settings":
             data = self._body()
             if data.get("qoder_bin"):   os.environ["QODER_BIN"]   = data["qoder_bin"]
@@ -2345,3 +2551,6 @@ if __name__ == "__main__":
         _terminate(BOT_PID)
         _terminate(POSTER_PID)
         _terminate(WATCHER_PID)
+        _terminate(LI_COMMENTER_PID)
+        _terminate(LI_POSTER_PID)
+        _terminate(LI_WATCHER_PID)

@@ -23,7 +23,14 @@ DEFAULT_STATS = {
     "last_post_time": "",
     "last_error": "",
     "last_error_time": "",
-    "last_heartbeat": 0.0
+    "last_heartbeat": 0.0,
+    # LinkedIn stats
+    "li_comments_sent": 0,
+    "li_comments_skipped": 0,
+    "li_posts_sent": 0,
+    "li_posts_skipped": 0,
+    "li_replies_sent": 0,
+    "li_errors": 0,
 }
 
 def _load_stats():
@@ -67,15 +74,24 @@ def increment(key: str):
         stats = _load_stats()
         if key in stats:
             stats[key] += 1
+        else:
+            # Allow dynamic LinkedIn keys (li_*) even if not in DEFAULT_STATS
+            stats[key] = 1
 
-            # Auto-update corresponding timestamps
-            time_str = get_current_time_str()
-            if key == "comments_sent":
-                stats["last_comment_time"] = time_str
-            elif key == "posts_created":
-                stats["last_post_time"] = time_str
+        # Auto-update corresponding timestamps
+        time_str = get_current_time_str()
+        if key == "comments_sent":
+            stats["last_comment_time"] = time_str
+        elif key == "posts_created":
+            stats["last_post_time"] = time_str
 
-            _save_stats(stats)
+        _save_stats(stats)
+
+def log_comment(text: str):
+    with _lock:
+        stats = _load_stats()
+        stats["last_comment_time"] = get_current_time_str()
+        _save_stats(stats)
 
 def log_error(error_msg: str):
     with _lock:
