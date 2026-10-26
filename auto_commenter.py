@@ -738,7 +738,17 @@ def post_reply(session, post_id: str, text: str) -> Optional[str]:
     })
 
     try:
-        resp = session.post(REPLY_ENDPOINT, data=payload, headers=headers, timeout=30)
+        resp = session.post(REPLY_ENDPOINT, data=payload, headers=headers, timeout=30,
+                            allow_redirects=False)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("location", "")
+            if "accounts/login" in loc or "login" in loc:
+                raise SessionExpiredError(
+                    f"post_reply: session expired (redirect to login). "
+                    f"Perbarui THREADS_SESSION_ID di .env"
+                )
+            print(f"[REPLY_WARN] Redirect ke: {loc[:80]}")
+            return None
         if resp.status_code in (401, 403):
             raise SessionExpiredError(f"post_reply HTTP {resp.status_code}")
         if resp.status_code == 429:
@@ -746,6 +756,12 @@ def post_reply(session, post_id: str, text: str) -> Optional[str]:
             _rate_backoff.record()
             raise RateLimitError(retry_after)
         if resp.status_code == 200:
+            ct = resp.headers.get("content-type", "")
+            if "text/html" in ct:
+                raise SessionExpiredError(
+                    "post_reply: server mengembalikan HTML (session expired). "
+                    "Perbarui THREADS_SESSION_ID di .env"
+                )
             media = resp.json().get("media") or {}
             result = media.get("pk") or media.get("id")
             return str(result) if result else None

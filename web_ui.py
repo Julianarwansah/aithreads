@@ -228,6 +228,30 @@ def _get_trending_cache() -> dict:
     return {"ts": 0, "posts": []}
 
 
+def _get_default_account_status() -> dict:
+    """Status akun utama dari root .env — selalu muncul pertama di Multi-Akun."""
+    import stats_tracker
+    username = os.getenv("THREADS_USERNAME", "")
+    stats    = {}
+    try:
+        stats = stats_tracker.get_stats()
+    except Exception:
+        pass
+    cfg = config_loader.load()
+    return {
+        "name":               "__default__",
+        "username":           username or "akun_utama",
+        "is_default":         True,
+        "bot_running":        _is_alive(BOT_PID),
+        "poster_running":     _is_alive(POSTER_PID),
+        "watcher_running":    _is_alive(WATCHER_PID),
+        "last_comment":       stats.get("last_comment_time", ""),
+        "comments_sent":      stats.get("comments_sent", 0),
+        "poster_enabled":     cfg.get("poster_enabled", False),
+        "auto_reply_enabled": cfg.get("auto_reply_enabled", False),
+    }
+
+
 def _get_account_full_status(name: str) -> dict:
     """Status lengkap satu akun: proses + stats + config."""
     apath       = os.path.join(_DIR, "accounts", name)
@@ -527,6 +551,10 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
   <div class="spacer"></div>
   <div class="topbar-right">
     <div class="topbar-schedule" id="sched-badge">⏰ —</div>
+    <button class="btn btn-ghost" style="font-size:11px;padding:3px 10px;gap:5px;display:flex;align-items:center" onclick="goPage('akun')" title="Kelola akun">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+      <span id="topbar-username">@—</span>
+    </button>
     <div class="topbar-time" id="clock"></div>
   </div>
 </div>
@@ -1825,31 +1853,52 @@ async function loadAccounts(){
   const grid=document.getElementById('acct-grid');
   if(!grid) return;
   const accounts=await(await fetch('/api/accounts')).json();
-  if(!accounts.length){
-    grid.innerHTML='<div style="color:var(--muted);font-size:12px">Belum ada akun. Klik <b>Tambah Akun</b> untuk mulai.</div>';
-    return;
-  }
+  // accounts selalu punya minimal 1 entry (akun default)
   grid.innerHTML=accounts.map(a=>{
+    const isDefault = !!a.is_default;
     const botBadge  = a.bot_running    ?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
     const postBadge = a.poster_running ?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
     const watBadge  = a.watcher_running?`<span class="badge on"><span class="dot on"></span>Aktif</span>`:`<span class="badge off"><span class="dot off"></span>Mati</span>`;
-    const botBtn    = a.bot_running    ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','bot','stop')">■ Stop</button>`
-                                       :`<button class="btn btn-green xs" onclick="acctProcess('${a.name}','bot','start')">▶ Start</button>`;
-    const postBtn   = a.poster_running ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','poster','stop')">■ Stop</button>`
-                                       :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','poster','start')">▶ Start</button>`;
-    const watBtn    = a.watcher_running?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','watcher','stop')">■ Stop</button>`
-                                       :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','watcher','start')">▶ Start</button>`;
-    const lastCmt   = a.last_comment ? `terakhir: ${a.last_comment}` : 'belum pernah komentar';
-    return `<div class="acct-card">
+
+    // Akun default pakai endpoint /api/bot, akun tambahan pakai /api/accounts/{name}
+    const botBtn  = isDefault
+      ? (a.bot_running
+          ?`<button class="btn btn-red xs" onclick="fetch('/api/bot/stop',{method:'POST'}).then(()=>loadAccounts())">■ Stop</button>`
+          :`<button class="btn btn-green xs" onclick="fetch('/api/bot/start',{method:'POST'}).then(()=>loadAccounts())">▶ Start</button>`)
+      : (a.bot_running
+          ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','bot','stop')">■ Stop</button>`
+          :`<button class="btn btn-green xs" onclick="acctProcess('${a.name}','bot','start')">▶ Start</button>`);
+
+    const postBtn = isDefault
+      ? (a.poster_running
+          ?`<button class="btn btn-red xs" onclick="fetch('/api/poster/stop',{method:'POST'}).then(()=>loadAccounts())">■ Stop</button>`
+          :`<button class="btn btn-ghost xs" onclick="fetch('/api/poster/start',{method:'POST'}).then(()=>loadAccounts())">▶ Start</button>`)
+      : (a.poster_running
+          ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','poster','stop')">■ Stop</button>`
+          :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','poster','start')">▶ Start</button>`);
+
+    const watBtn  = isDefault
+      ? (a.watcher_running
+          ?`<button class="btn btn-red xs" onclick="fetch('/api/watcher/stop',{method:'POST'}).then(()=>loadAccounts())">■ Stop</button>`
+          :`<button class="btn btn-ghost xs" onclick="fetch('/api/watcher/start',{method:'POST'}).then(()=>loadAccounts())">▶ Start</button>`)
+      : (a.watcher_running
+          ?`<button class="btn btn-red xs" onclick="acctProcess('${a.name}','watcher','stop')">■ Stop</button>`
+          :`<button class="btn btn-ghost xs" onclick="acctProcess('${a.name}','watcher','start')">▶ Start</button>`);
+
+    const lastCmt = a.last_comment ? `terakhir: ${a.last_comment}` : 'belum pernah komentar';
+    const defBadge = isDefault ? `<span style="font-size:9px;background:var(--purple);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px">UTAMA</span>` : '';
+    const actionBtns = isDefault
+      ? `<button class="btn btn-ghost xs" onclick="goPage('set')">⚙ Pengaturan</button>`
+      : `<button class="btn btn-ghost xs" onclick="openAcctSettings('${a.name}')">⚙</button>
+         <button class="btn btn-danger xs" onclick="deleteAcct('${a.name}')">✕</button>`;
+
+    return `<div class="acct-card"${isDefault?' style="border-color:var(--purple);border-width:1px"':''}>
       <div class="acct-hdr">
         <div>
-          <div class="acct-uname">@${a.username}</div>
-          <div class="acct-label">${a.name}</div>
+          <div class="acct-uname">@${a.username}${defBadge}</div>
+          <div class="acct-label">${isDefault ? 'Akun utama (.env)' : a.name}</div>
         </div>
-        <div style="display:flex;gap:4px">
-          <button class="btn btn-ghost xs" onclick="openAcctSettings('${a.name}')">⚙</button>
-          <button class="btn btn-danger xs" onclick="deleteAcct('${a.name}')">✕</button>
-        </div>
+        <div style="display:flex;gap:4px">${actionBtns}</div>
       </div>
       <div class="acct-proc">
         <div class="proc-row"><span class="proc-lbl">Bot</span>${botBadge}${botBtn}</div>
@@ -1878,6 +1927,17 @@ function goPage(id){
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
+// Load username ke topbar
+(async()=>{
+  try{
+    const accounts = await(await fetch('/api/accounts')).json();
+    const def = accounts.find(a=>a.is_default);
+    if(def && def.username){
+      document.getElementById('topbar-username').textContent = '@'+def.username;
+    }
+  }catch(e){}
+})();
+
 connectSSE();
 pollStatus();loadComments();loadChart();
 setInterval(pollStatus,5000);
@@ -2096,7 +2156,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _get_watcher_stats())
 
         elif path == "/api/accounts":
-            statuses = [_get_account_full_status(a["name"]) for a in account_manager.list_accounts()]
+            statuses = [_get_default_account_status()]
+            statuses += [_get_account_full_status(a["name"]) for a in account_manager.list_accounts()]
             self._json(200, statuses)
 
         elif path.startswith("/api/accounts/") and path.endswith("/settings"):
