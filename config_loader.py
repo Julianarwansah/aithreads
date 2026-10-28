@@ -21,6 +21,7 @@ DEFAULTS = {
     "max_post_age_hours":   5,
     "it_ai_keywords_extra": [],
     "loker_keywords_extra": [],
+    "promo_keywords_extra": [],
 
     # komentar
     "delay_min_minutes":    14,

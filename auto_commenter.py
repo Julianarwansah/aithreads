@@ -1057,9 +1057,14 @@ _SENSITIVE_PATTERNS = [
     # Politik panas
     r'\b(coblos|golput|pilkada|pilpres|calon presiden|caleg|partai [a-z]+|'
     r'rezim|turunkan presiden|people power|#reformasi)\b',
-    # Promosi / iklan / MLM
-    r'\b(harga promo|diskon [0-9]+%|hubungi wa|wa kami|link bio|order sekarang|'
-    r'limited stock|stok terbatas|garansi uang kembali|passive income|cuan jutaan)\b',
+    # Promosi / iklan / MLM / jualan
+    r'\b(harga promo|diskon [0-9]+%|hubungi wa|wa kami|link bio|link di bio|order sekarang|'
+    r'open order|open po|pre order|preorder|ready stock|ready stok|stok ready|'
+    r'limited stock|stok terbatas|slot terbatas|garansi uang kembali|passive income|cuan jutaan|'
+    r'jasa titip|jastip|jasa follow|jasa like|open endorse|endorse murah|paid promote|'
+    r'slot iklan|keranjang kuning|checkout sekarang|gratis ongkir|free ongkir|'
+    r'minat dm|dm untuk order|dm buat order|dm for rate|rate card|'
+    r'testimoni lengkap|ribuan pelanggan|aku jual|gue jual|kami jual|dijual|for sale)\b',
     # Hoax signals
     r'\b(viralkan|sebarkan|jangan sampai|ini nyata|ini fakta|bukti sudah ada|'
     r'share sebelum dihapus|tersebar|bocoran)\b',
@@ -1084,6 +1089,17 @@ _LOKER_KEYWORDS = [
     "apply now", "daftarkan diri", "job desc", "job description",
     "kualifikasi:", "persyaratan:", "benefit:", "🚨 hiring", "📢 hiring",
     "walk in interview", "walk-in interview",
+]
+
+# Frasa jual-beli yang tidak ambigu. Regex _SENSITIVE_PATTERNS menangkap varian
+# berpola (diskon N%, dll); daftar ini untuk frasa utuh dan bisa diperluas user
+# lewat config promo_keywords_extra tanpa menyentuh kode.
+_PROMO_KEYWORDS = [
+    "open order", "open po", "pre order", "ready stock", "ready stok",
+    "jasa titip", "jastip", "jasa follow", "jasa like", "open endorse",
+    "paid promote", "slot iklan", "keranjang kuning", "gratis ongkir",
+    "minat dm", "dm untuk order", "link di bio", "rate card",
+    "aku jual", "gue jual", "kami jual", "dijual",
 ]
 
 # Keyword yang aman untuk substring match (panjang/spesifik, tidak ada risiko false positive)
@@ -1153,6 +1169,12 @@ def should_comment(caption: str) -> tuple[bool, str]:
     for kw in loker_kws:
         if kw in low:
             return False, f"lowongan kerja ({kw!r})"
+
+    # Cek jualan/promosi: orang yang nawarin produk/jasa tidak dikomentari
+    promo_kws = _PROMO_KEYWORDS + [k.lower() for k in cfg.get("promo_keywords_extra", [])]
+    for kw in promo_kws:
+        if kw in low:
+            return False, f"promosi ({kw!r})"
 
     def _context_ok(kw: str) -> bool:
         """False jika keyword match tapi konteksnya non-IT."""

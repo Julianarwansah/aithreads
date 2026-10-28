@@ -94,11 +94,12 @@ def _auto_blacklist(username: str):
 
 
 # ── klasifikasi balasan masuk ─────────────────────────────────────────────────
-_CLASSIFY_TOKENS = ("jelas", "tidak_jelas", "tidak_sopan")
+_CLASSIFY_TOKENS = ("jelas", "tidak_jelas", "tidak_sopan", "promosi")
 
 # Urutan alternasi penting: "jelas" adalah substring dari "tidak_jelas", jadi
 # token yang lebih panjang harus dicoba duluan supaya tidak salah potong.
-_CLASSIFY_TOKEN_RE = _re.compile(r"tidak_jelas|tidak_sopan|jelas")
+# Diturunkan dari tuple supaya daftar token dan regex tidak bisa drift.
+_CLASSIFY_TOKEN_RE = _re.compile("|".join(sorted(_CLASSIFY_TOKENS, key=len, reverse=True)))
 
 # Kalau penilainya sendiri bermasalah → anggap jelas. Penilai yang rusak tidak
 # boleh bikin bot berhenti membalas orang sungguhan.
@@ -154,8 +155,9 @@ def _classify_reply(reply_text: str, our_comment: str = "") -> str:
         "Tentukan kategori balasan berikut:\n"
         "- tidak_sopan: kasar, menghina, merendahkan, atau nyerang orangnya\n"
         "- tidak_jelas: kata-katanya acak-acakan/ngelantur sampai maksudnya nggak kebaca\n"
-        "- jelas: selain dua di atas (termasuk yang singkat, beda pendapat, atau nanya)\n\n"
-        "Jawab HANYA salah satu token ini: jelas / tidak_jelas / tidak_sopan\n"
+        "- promosi: orangnya jualan, nawarin jasa/produk, endorse, atau ngajak transaksi\n"
+        "- jelas: selain tiga di atas (termasuk yang singkat, beda pendapat, atau nanya)\n\n"
+        "Jawab HANYA salah satu token ini: jelas / tidak_jelas / tidak_sopan / promosi\n"
         "Contoh jawaban yang benar: tidak_sopan\n"
         "Jangan tulis penjelasan atau teks lain.\n\n"
         f"Komentar gue sebelumnya: {(our_comment or '')[:100]}\n"
@@ -515,8 +517,15 @@ def check_and_reply(session, our_username: str):
                 aksi = {
                     "tidak_sopan":  "skip",
                     "tidak_jelas":  "balas klarifikasi",
+                    "promosi":      "skip",
                 }.get(reply_kind, "balas normal")
                 print(f"  [WATCHER KLASIFIKASI] @{commenter}: {reply_kind} → {aksi}")
+
+            if reply_kind == "promosi":
+                print(f"  [WATCHER] ⚠ Balasan berupa jualan/promosi dari @{commenter}: "
+                      f"'{reply_text[:60]}…' — tidak dibalas")
+                _mark_replied(rid, "SKIP_PROMOSI")
+                continue
 
             if reply_kind == "tidak_sopan":
                 print(f"  [WATCHER] ⚠ Balasan kasar/tidak sopan dari @{commenter}: "
