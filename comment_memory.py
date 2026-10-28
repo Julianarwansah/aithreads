@@ -17,6 +17,48 @@ MEMORY_FILE = os.path.join(_DATA_DIR, "comment_memory.json")
 MAX_ENTRIES = 100
 _lock       = threading.Lock()
 
+# Draf yang DIBUANG quality gate disimpan terpisah, bukan di MEMORY_FILE. Memory
+# utama hanya berisi komentar yang benar-benar terkirim — kalau draf gagal ikut
+# disimpan di sana, ia akan mengotori engagement stats, dedup, dan daftar "komentar
+# terakhir" yang dipakai prompt.
+REJECTED_FILE = os.path.join(_DATA_DIR, "rejected_comments.json")
+MAX_REJECTED  = 50
+
+# Entri lama (ditulis sebelum rubrik kualitas ada) tidak punya field natural/clarity/
+# politeness sama sekali, jadi semua pembacaan wajib lewat .get() dan entri tanpa skor
+# diperlakukan netral — bukan dianggap buruk.
+MIN_SCORE_FALLBACK = 6      # sama dengan DEFAULTS config_loader.quality_min_score
+
+
+def _cfg_int(key: str, default: int) -> int:
+    """Baca config int. Import di dalam fungsi + try/except: module ini dipakai banyak
+    proses, jangan sampai crash cuma karena config_loader bermasalah."""
+    try:
+        import config_loader
+        val = config_loader.get(key)
+        return int(val) if val is not None else default
+    except Exception:
+        return default
+
+
+def _as_score(val):
+    """Paksa nilai jadi int skala 1-10; None kalau tidak bisa dipakai."""
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(10, num))
+
+
+def _entry_scores(entry: dict) -> list:
+    """Ambil skor kualitas yang benar-benar ada di sebuah entri (entri lama → kosong)."""
+    out = []
+    for key in ("natural", "clarity", "politeness"):
+        val = entry.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            out.append(int(val))
+    return out
+
 
 # ── style detection ───────────────────────────────────────────────────────────
 def _detect_style(text: str) -> str:
@@ -66,21 +108,104 @@ def _save(data: list):
     )
 
 
-def save(caption: str, reply: str, post_sentiment: str = "info"):
-    """Simpan komentar baru ke memory."""
+def save(caption: str, reply: str, post_sentiment: str = "info",
+         natural: int = None, clarity: int = None, politeness: int = None):
+    """
+    Simpan komentar baru ke memory.
+
+    natural/clarity/politeness: skor kualitas 1-10 dari auto_commenter._score_quality.
+    Semua opsional supaya pemanggil lama (mis. linkedin_commenter) tidak berubah —
+    kalau tidak diberikan, field skor tidak ditulis sama sekali, persis entri lama.
+    Flag unclear/impolite diturunkan dari skor terhadap ambang quality_min_score.
+    """
+    min_score = _cfg_int("quality_min_score", MIN_SCORE_FALLBACK)
+
+    entry = {
+        "ts":             time.time(),
+        "caption":        caption[:120],
+        "reply":          reply,
+        "style":          _detect_style(reply),
+        "topic_bucket":   _detect_topic_bucket(caption),
+        "post_sentiment": post_sentiment,
+    }
+
+    nat = _as_score(natural)
+    cla = _as_score(clarity)
+    pol = _as_score(politeness)
+    if nat is not None:
+        entry["natural"] = nat
+    if cla is not None:
+        entry["clarity"] = cla
+        entry["unclear"] = cla < min_score
+    if pol is not None:
+        entry["politeness"] = pol
+        entry["impolite"] = pol < min_score
+
     with _lock:
         data = _load()
-        data.append({
-            "ts":             time.time(),
-            "caption":        caption[:120],
-            "reply":          reply,
-            "style":          _detect_style(reply),
-            "topic_bucket":   _detect_topic_bucket(caption),
-            "post_sentiment": post_sentiment,
-        })
+        data.append(entry)
         if len(data) > MAX_ENTRIES:
             data = data[-MAX_ENTRIES:]
         _save(data)
+
+
+def _load_rejected() -> list:
+    try:
+        if Path(REJECTED_FILE).exists():
+            data = json.loads(Path(REJECTED_FILE).read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def save_rejected(caption: str, reply: str, scores: dict = None):
+    """
+    Simpan draf yang DIBUANG quality gate supaya AI bisa belajar dari kesalahannya.
+
+    Tanpa ini draf buruk lenyap begitu saja: gate memang berhasil menahannya, tapi
+    tidak ada bahan untuk `get_negative_examples()` sehingga pola yang sama bisa
+    muncul lagi selamanya.
+    """
+    if not (reply or "").strip():
+        return
+    scores = scores or {}
+    min_score = _cfg_int("quality_min_score", MIN_SCORE_FALLBACK)
+    nat = _as_score(scores.get("natural"))
+    cla = _as_score(scores.get("clarity"))
+    pol = _as_score(scores.get("politeness"))
+
+    entry = {
+        "ts":      time.time(),
+        "caption": (caption or "")[:120],
+        "reply":   reply,
+        "style":   _detect_style(reply),
+        "reason":  _negative_reason({
+            "natural": nat, "clarity": cla, "politeness": pol,
+            "unclear": cla is not None and cla < min_score,
+            "impolite": pol is not None and pol < min_score,
+        }, min_score),
+    }
+    if nat is not None:
+        entry["natural"] = nat
+    if cla is not None:
+        entry["clarity"] = cla
+        entry["unclear"] = cla < min_score
+    if pol is not None:
+        entry["politeness"] = pol
+        entry["impolite"] = pol < min_score
+
+    try:
+        with _lock:
+            data = _load_rejected()
+            data.append(entry)
+            if len(data) > MAX_REJECTED:
+                data = data[-MAX_REJECTED:]
+            Path(REJECTED_FILE).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+    except Exception:
+        pass
 
 
 # ── analysis ──────────────────────────────────────────────────────────────────
@@ -135,18 +260,37 @@ def mark_engagement(reply_text: str, caption: str = ""):
                     return
 
 
+def _negative_block() -> str:
+    """
+    Seksi prompt berisi contoh komentar buruk kita sendiri. String kosong kalau
+    tidak ada. Dipakai dua tempat (memory kosong dan memory terisi) supaya draf
+    yang dibuang gate tetap jadi bahan belajar sejak komentar pertama.
+    """
+    try:
+        negative = get_negative_examples(_cfg_int("quality_negative_examples", 3))
+    except Exception:
+        return ""
+    if not negative:
+        return ""
+    text = "\n\n🚫 CONTOH BURUK komentar lo sendiri — pola kayak gini yang bikin orang ilfeel:"
+    for ex in negative:
+        text += f'\nJANGAN kayak gini: "{ex["reply"][:120]}" (alasannya: {ex["reason"]})'
+    return text + "\n→ ganti polanya: maksudnya harus langsung kebaca, bahasanya tetap sopan"
+
+
 def build_memory_prompt(n: int = 8) -> str:
     """
     Buat teks memory untuk prompt:
     - Daftar N komentar terakhir + tipe masing-masing
     - ⭐ pada komentar yang dapat balasan (engaged)
     - Hint untuk variasi kalau ada tipe yang dominan
+    - Contoh komentar buruk (tidak jelas / tidak sopan) yang wajib dihindari
     """
     with _lock:
         data = _load()
 
     if not data:
-        return "(belum ada histori komentar — ini komentar pertamamu)"
+        return "(belum ada histori komentar — ini komentar pertamamu)" + _negative_block()
 
     recent   = data[-n:]
     overused = get_overused_style()
@@ -202,6 +346,8 @@ def build_memory_prompt(n: int = 8) -> str:
             "opinion":    "opini",
         }.get(overused_topic, overused_topic)
         text += f"\n⚠ Topik: lo baru-baru ini sering komentar soal {topic_label} — coba variasi ke topik lain"
+
+    text += _negative_block()
 
     return text
 
@@ -301,6 +447,98 @@ def get_engaged_comments(n: int = 10) -> list:
         data = _load()
     engaged = [e for e in reversed(data) if e.get("engaged")]
     return engaged[:n]
+
+
+def _negative_reason(entry: dict, min_score: int) -> str:
+    """Alasan singkat kenapa sebuah komentar dipakai sebagai contoh buruk."""
+    reasons = []
+    clarity    = entry.get("clarity")
+    politeness = entry.get("politeness")
+    natural    = entry.get("natural")
+
+    if entry.get("unclear") or (isinstance(clarity, (int, float)) and clarity < min_score):
+        reasons.append("kurang jelas")
+    if entry.get("impolite") or (isinstance(politeness, (int, float)) and politeness < min_score):
+        reasons.append("kurang sopan")
+    if isinstance(natural, (int, float)) and natural < min_score:
+        reasons.append("kaku kayak robot")
+    return " & ".join(reasons) if reasons else "skor kualitasnya rendah"
+
+
+def get_negative_examples(n: int = 3) -> list:
+    """
+    Kembalikan contoh komentar buruk kita sendiri supaya AI tidak mengulang polanya.
+
+    Hanya entri yang benar-benar jelek yang diambil (ber-flag unclear/impolite atau
+    skor terendahnya di bawah quality_min_score) — n yang lebih besar dari jumlah
+    komentar buruk tidak boleh menyeret komentar bagus ke dalam daftar "jangan".
+    Urutan: yang ber-flag dulu (ini keluhan utama user), lalu skor terendah, lalu terbaru.
+    Entri lama tanpa field skor dilewati — tidak ada bukti kalau itu buruk.
+
+    Return: [{"reply", "reason", "natural", "clarity", "politeness", "worst"}, ...]
+    """
+    if n <= 0:
+        return []
+
+    min_score = _cfg_int("quality_min_score", MIN_SCORE_FALLBACK)
+    with _lock:
+        data     = _load()
+        rejected = _load_rejected()
+
+    candidates = []
+
+    # Draf yang dibuang quality gate: sudah pasti contoh buruk, tidak difilter ulang.
+    # Inilah sumber utama — memory utama hanya berisi komentar yang lolos gate.
+    for e in rejected:
+        reply = (e.get("reply") or "").strip()
+        if not reply:
+            continue
+        scores = _entry_scores(e)
+        candidates.append({
+            "flagged":    True,
+            "worst":      min(scores) if scores else 0,
+            "ts":         e.get("ts", 0) or 0,
+            "reply":      reply,
+            "reason":     e.get("reason") or _negative_reason(e, min_score),
+            "natural":    e.get("natural"),
+            "clarity":    e.get("clarity"),
+            "politeness": e.get("politeness"),
+        })
+
+    for e in data:
+        reply = (e.get("reply") or "").strip()
+        if not reply:
+            continue
+        scores = _entry_scores(e)
+        if not scores:
+            continue        # entri lama: belum pernah dinilai
+        worst   = min(scores)
+        flagged = bool(e.get("unclear")) or bool(e.get("impolite"))
+        if not flagged and worst >= min_score:
+            continue        # komentar ini baik-baik saja, jangan dijadikan contoh buruk
+        candidates.append({
+            "flagged":    flagged,
+            "worst":      worst,
+            "ts":         e.get("ts", 0) or 0,
+            "reply":      reply,
+            "reason":     _negative_reason(e, min_score),
+            "natural":    e.get("natural"),
+            "clarity":    e.get("clarity"),
+            "politeness": e.get("politeness"),
+        })
+
+    candidates.sort(key=lambda c: (not c["flagged"], c["worst"], -c["ts"]))
+    return [
+        {
+            "reply":      c["reply"],
+            "reason":     c["reason"],
+            "natural":    c["natural"],
+            "clarity":    c["clarity"],
+            "politeness": c["politeness"],
+            "worst":      c["worst"],
+        }
+        for c in candidates[:n]
+    ]
 
 
 def get_summary() -> dict:

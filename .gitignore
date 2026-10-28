@@ -18,10 +18,12 @@ ui_settings.json
 graphql_dump.json
 network_capture.json
 comment_memory.json
+rejected_comments.json
 growth_stats.json
 replied_cache.json
 watcher_output.log
 poster_last_post.json
+poster_daily_count.json
 
 # === Python ===
 __pycache__/

@@ -336,20 +336,85 @@ def _heuristic_score(text: str) -> float:
     return score
 
 
-def _score_naturalness(draft: str, caption: str) -> int:
-    """Minta LLM nilai naturalness 1–10. Default 7 (lolos) kalau LLM error."""
+# Nilai lolos default kalau penilainya sendiri bermasalah — bot tidak boleh
+# batal komentar cuma karena LLM penilai error/format jawabannya aneh.
+_QUALITY_DEFAULT = {"natural": 7, "clarity": 7, "politeness": 7}
+
+# Jawaban yang diminta dari LLM: tiga angka dipisah "|" (mis. "8|7|9")
+_QUALITY_TRIPLE = re.compile(r'(\d{1,2})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})')
+
+
+def _cfg_int(key: str, default: int) -> int:
+    """Baca config sebagai int; jatuh ke default kalau hilang atau bukan angka."""
+    try:
+        val = config_loader.get(key)
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_quality_response(resp: str) -> dict:
+    """
+    Ubah jawaban LLM jadi dict skor. Return None kalau formatnya tidak dikenali.
+    Dicari 2 tingkat: baris yang isinya persis tiga angka, lalu pola "|" di mana pun.
+    """
+    if not resp:
+        return None
+
+    for line in resp.strip().splitlines():
+        m = re.fullmatch(r'(\d{1,2})\s*[\|/,;:\s]\s*(\d{1,2})\s*[\|/,;:\s]\s*(\d{1,2})', line.strip())
+        if not m:
+            m = _QUALITY_TRIPLE.search(line)
+        if m:
+            vals = [max(1, min(10, int(g))) for g in m.groups()]
+            return {"natural": vals[0], "clarity": vals[1], "politeness": vals[2]}
+    return None
+
+
+def _score_quality(draft: str, caption: str) -> dict:
+    """
+    Minta LLM nilai 3 dimensi kualitas dalam SATU panggilan (3 panggilan = 3x ~10 detik):
+    natural (robot vs manusia), clarity (jelas vs ngelantur), politeness (sopan vs kasar).
+
+    Return: {"natural": int, "clarity": int, "politeness": int} skala 1-10.
+    Kalau LLM exception atau jawabannya tidak bisa di-parse → semua 7 (lolos gate).
+    """
     prompt = (
-        "Nilai seberapa natural komentar Threads berikut (1=robot banget, 10=manusia beneran).\n"
-        "Jawab HANYA angka, tidak ada teks lain.\n\n"
+        "Nilai kualitas komentar Threads berikut pada 3 dimensi, skala 1-10:\n"
+        "- natural: 1 = kaku kayak robot, 10 = terdengar manusia beneran\n"
+        "- clarity: 1 = kata-katanya tidak jelas/ngelantur, 10 = maksudnya langsung kebaca\n"
+        "- politeness: 1 = kasar/tidak sopan/merendahkan, 10 = sopan dan aman\n\n"
+        "Jawab HANYA tiga angka dipisah tanda '|' dengan urutan natural|clarity|politeness.\n"
+        "Contoh jawaban yang benar: 8|7|9\n"
+        "Jangan tulis penjelasan atau teks lain.\n\n"
         f"Post: {caption[:80]}\n"
         f"Komentar: {draft}"
     )
     try:
         resp = llm_router.generate(prompt)
-        m = re.search(r'\b(10|[1-9])\b', resp)
-        return int(m.group()) if m else 7
-    except Exception:
-        return 7
+        parsed = _parse_quality_response(resp)
+        if parsed:
+            return parsed
+        print(f"  [CRITIQUE] Jawaban penilai tidak dikenali ('{(resp or '')[:40]}') — pakai default 7|7|7")
+    except Exception as exc:
+        print(f"  [CRITIQUE] LLM error saat menilai ({exc}) — pakai default 7|7|7")
+    return dict(_QUALITY_DEFAULT)
+
+
+def _score_naturalness(draft: str, caption: str) -> int:
+    """
+    API lama, masih dipakai reply_watcher/threads_poster/linkedin_poster yang
+    mengharapkan int — diambil dari dimensi 'natural' _score_quality (tetap 1 panggilan).
+    """
+    return _score_quality(draft, caption)["natural"]
+
+
+def _log_quality_scores(scores: dict, min_score: int):
+    """Cetak skor 3 dimensi + nilai terendah yang menentukan lolos/tidaknya gate."""
+    worst   = min(scores.values())
+    verdict = f"≥ {min_score}" if worst >= min_score else f"< {min_score}"
+    print(f"  [CRITIQUE] natural={scores.get('natural')} jelas={scores.get('clarity')} "
+          f"sopan={scores.get('politeness')} → min {worst} {verdict}")
 
 
 def _build_engagement_constraint() -> str:
@@ -602,14 +667,33 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
             if not _quality_check(reply):
                 print(f"  [QC] Masih gagal setelah regenerate — pakai hasil terakhir")
 
-        # ── self-critique gate — LLM nilai naturalness ────────────────────────
-        critique_score = _score_naturalness(reply, caption)
-        print(f"  [CRITIQUE] Skor naturalness: {critique_score}/10")
-        if critique_score < 7:
-            print(f"  [CRITIQUE] Skor rendah ({critique_score}/10) — generate ulang…")
+        # ── self-critique gate — LLM nilai 3 dimensi (natural/jelas/sopan) ────
+        min_score   = _cfg_int("quality_min_score", 6)
+        max_retries = _cfg_int("quality_max_retries", 2)
+
+        scores  = _score_quality(reply, caption)
+        _log_quality_scores(scores, min_score)
+
+        retries = 0
+        while min(scores.values()) < min_score and retries < max_retries:
+            retries += 1
+            print(f"  [CRITIQUE] Skor di bawah {min_score} — generate ulang ({retries}/{max_retries})…")
             retry = _do_generate()
-            if retry and retry != "SKIP" and _quality_check(retry):
-                reply = retry
+            if not retry or retry == "SKIP" or not _quality_check(retry):
+                print(f"  [CRITIQUE] Retry tidak menghasilkan kandidat valid — berhenti mencoba")
+                break
+            reply  = retry
+            scores = _score_quality(reply, caption)
+            _log_quality_scores(scores, min_score)
+
+        # Lebih baik tidak komentar sama sekali daripada kirim yang tidak jelas/kasar
+        if min(scores.values()) < min_score:
+            print(f"  [CRITIQUE] SKIP — setelah {retries}x generate ulang skor terendah "
+                  f"{min(scores.values())}/10 masih < {min_score}: '{reply[:60]}'")
+            # Simpan sebagai contoh negatif supaya pola ini tidak terulang. Tanpa ini
+            # draf buruk lenyap dan AI tidak pernah belajar dari kesalahannya.
+            comment_memory.save_rejected(caption, reply, scores)
+            return "SKIP"
 
         # ── semantic dedup — cek similarity dengan 5 komentar terakhir ────────
         recent_replies = comment_memory.get_recent_replies(n=5)
@@ -625,7 +709,12 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
 
         print(f"[FINAL]: {reply} ({len(reply)} kar)\n")
 
-        comment_memory.save(caption, reply, post_sentiment=sentiment)
+        comment_memory.save(
+            caption, reply, post_sentiment=sentiment,
+            natural=scores.get("natural"),
+            clarity=scores.get("clarity"),
+            politeness=scores.get("politeness"),
+        )
 
         _comment_history.append(reply)
         if len(_comment_history) > 3:
@@ -1154,7 +1243,13 @@ def process_timeline(session):
     except Exception:
         pass
 
-    app_mode = os.getenv("APP_MODE", "normal").lower()
+    # Config adalah sumber kebenaran karena bisa diubah live dari UI. Env hanya
+    # fallback: sebelumnya hanya os.getenv yang dibaca, jadi pilihan Mode di UI
+    # hilang tiap web_ui restart (proses anak mewarisi APP_MODE dari .env).
+    try:
+        app_mode = str(config_loader.get("app_mode") or os.getenv("APP_MODE", "normal")).lower()
+    except Exception:
+        app_mode = os.getenv("APP_MODE", "normal").lower()
 
     if app_mode == "trend":
         stats_tracker.increment("trend_posts_found")

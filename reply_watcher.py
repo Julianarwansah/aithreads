@@ -84,6 +84,86 @@ def _auto_blacklist(username: str):
             print(f"  [AUTO-BLACKLIST] @{username} ditambahkan ke blacklist otomatis")
 
 
+# ── klasifikasi balasan masuk ─────────────────────────────────────────────────
+_CLASSIFY_TOKENS = ("jelas", "tidak_jelas", "tidak_sopan")
+
+# Urutan alternasi penting: "jelas" adalah substring dari "tidak_jelas", jadi
+# token yang lebih panjang harus dicoba duluan supaya tidak salah potong.
+_CLASSIFY_TOKEN_RE = _re.compile(r"tidak_jelas|tidak_sopan|jelas")
+
+# Kalau penilainya sendiri bermasalah → anggap jelas. Penilai yang rusak tidak
+# boleh bikin bot berhenti membalas orang sungguhan.
+_CLASSIFY_DEFAULT = "jelas"
+
+
+def _parse_classify_response(resp: str) -> str:
+    """
+    Ubah jawaban LLM jadi salah satu token klasifikasi. Return "" kalau tidak dikenali.
+
+    Dicari 2 tingkat: baris yang isinya persis satu token (kasus LLM nurut),
+    lalu token pertama yang muncul di mana pun (kasus LLM ngeyel jelasin).
+    Spasi/strip disamakan jadi "_" supaya "tidak jelas" dan "tidak-jelas" ikut kebaca.
+    """
+    if not resp:
+        return ""
+
+    lines = []
+    for raw_line in resp.splitlines():
+        t = _re.sub(r"[*`\"'>]", " ", raw_line.lower())
+        t = _re.sub(r"[\s\-]+", "_", t).strip("._!?,;:")
+        if t:
+            lines.append(t)
+
+    for line in lines:
+        if line in _CLASSIFY_TOKENS:
+            return line
+
+    for line in lines:
+        m = _CLASSIFY_TOKEN_RE.search(line)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _classify_reply(reply_text: str, our_comment: str = "") -> str:
+    """
+    Klasifikasikan balasan orang ke: "jelas" / "tidak_jelas" / "tidak_sopan".
+
+    SATU panggilan llm_router.generate saja (tiap panggilan ~10 detik, jadi
+    tidak boleh dipecah jadi beberapa penilaian). Selalu fail-open ke "jelas":
+    kalau LLM exception atau jawabannya tidak dikenali, balasan diperlakukan
+    normal supaya watcher tetap membalas orang sungguhan.
+    """
+    if not (reply_text or "").strip():
+        return _CLASSIFY_DEFAULT
+
+    sys_prompt = (
+        "lo classifier balasan Threads. "
+        "jawab HANYA satu token, tanpa penjelasan, tanpa tanda baca."
+    )
+    prompt = (
+        "Tentukan kategori balasan berikut:\n"
+        "- tidak_sopan: kasar, menghina, merendahkan, atau nyerang orangnya\n"
+        "- tidak_jelas: kata-katanya acak-acakan/ngelantur sampai maksudnya nggak kebaca\n"
+        "- jelas: selain dua di atas (termasuk yang singkat, beda pendapat, atau nanya)\n\n"
+        "Jawab HANYA salah satu token ini: jelas / tidak_jelas / tidak_sopan\n"
+        "Contoh jawaban yang benar: tidak_sopan\n"
+        "Jangan tulis penjelasan atau teks lain.\n\n"
+        f"Komentar gue sebelumnya: {(our_comment or '')[:100]}\n"
+        f"Balasan mereka: {reply_text[:300]}"
+    )
+
+    try:
+        resp = llm_router.generate(prompt, system_prompt=sys_prompt)
+        label = _parse_classify_response(resp)
+        if label in _CLASSIFY_TOKENS:
+            return label
+        print(f"  [WATCHER KLASIFIKASI] Jawaban penilai tidak dikenali ('{(resp or '')[:40]}') — anggap jelas")
+    except Exception as e:
+        print(f"  [WATCHER KLASIFIKASI] LLM error saat menilai ({e}) — anggap jelas")
+    return _CLASSIFY_DEFAULT
+
+
 # ── shortcode converter ───────────────────────────────────────────────────────
 def _to_shortcode(num: int) -> str:
     """Konversi media pk (int) ke Threads/Instagram shortcode."""
@@ -317,6 +397,51 @@ contoh yang bagus:
         return ""
 
 
+# Balasan klarifikasi cadangan kalau LLM gagal — tetap nanya balik, tidak sok paham.
+_CLARIFY_FALLBACKS = [
+    "hah? gue kurang nangkep maksud lo apa",
+    "sorry, ini maksudnya gimana ya?",
+    "belum kebayang maksud lo — jelasin dikit dong",
+]
+
+
+def generate_clarification_reply(their_reply: str, our_comment: str = "") -> str:
+    """
+    Balasan untuk reply yang kata-katanya tidak jelas: tanya balik singkat & ramah.
+
+    Satu panggilan LLM; kalau gagal atau hasilnya kosong/berisi link, pakai
+    fallback tetap supaya balasan klarifikasi selalu ada.
+    """
+    sys_prompt = """ada orang yang balas komentar lo di Threads, tapi kata-katanya nggak kebaca maksudnya.
+lo mau nanya balik biar jelas — bukan sok paham, bukan ngeledek.
+
+cara lo bales:
+- sangat singkat, 1 kalimat cukup
+- nada ramah dan penasaran, jangan nyalahin orangnya
+- pakai bahasa lo: "gue", "lo", "sih", "aja"
+- JANGAN pura-pura ngerti isi balasan mereka
+- JANGAN ngeledek atau nyindir
+- JANGAN sebut nama orang"""
+
+    user_prompt = (
+        f"Komentar gue sebelumnya: {(our_comment or '')[:100]}\n"
+        f"Mereka balas (nggak jelas): {their_reply[:200]}\n\n"
+        f"Tanya balik singkat biar paham maksudnya:"
+    )
+
+    try:
+        raw = llm_router.generate(user_prompt, system_prompt=sys_prompt)
+        text = _re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', raw).strip().lstrip('"> ').strip()
+        text = text.splitlines()[0].strip() if text else ""
+        if text and not _re.search(r'https?://\S+', text):
+            print(f"  [WATCHER DRAFT] klarifikasi: '{text[:50]}'")
+            return text[:200]
+        print("  [WATCHER] Klarifikasi dari LLM kosong/berisi link — pakai fallback")
+    except Exception as e:
+        print(f"  [WATCHER] LLM error saat bikin klarifikasi: {e} — pakai fallback")
+    return random.choice(_CLARIFY_FALLBACKS)
+
+
 # ── satu siklus cek ───────────────────────────────────────────────────────────
 def check_and_reply(session, our_username: str):
     recent = rc.get_recent_post_ids(max_age_hours=48)
@@ -331,6 +456,11 @@ def check_and_reply(session, our_username: str):
 
     print(f"[WATCHER] Mengecek {len(trackable)} komentar yang bisa di-track…")
     replied_count = 0
+
+    # Dibaca sekali per siklus: klasifikasi balasan & blacklist otomatis bersifat opsional
+    cfg              = config_loader.load()
+    classify_enabled = bool(cfg.get("reply_classify_enabled", True))
+    blacklist_impolite = bool(cfg.get("auto_blacklist_impolite", False))
 
     for entry in trackable:
         comment_id  = entry["comment_id"]
@@ -359,7 +489,33 @@ def check_and_reply(session, our_username: str):
                 _mark_replied(rid, "")
                 continue
 
-            resp_text = generate_watcher_reply(reply_text, our_comment, orig_cap)
+            # Klasifikasi balasan — di-gate config. Kalau mati, tidak ada panggilan
+            # LLM tambahan dan alurnya persis sama seperti sebelumnya.
+            reply_kind = _CLASSIFY_DEFAULT
+            if classify_enabled:
+                reply_kind = _classify_reply(reply_text, our_comment)
+                aksi = {
+                    "tidak_sopan":  "skip",
+                    "tidak_jelas":  "balas klarifikasi",
+                }.get(reply_kind, "balas normal")
+                print(f"  [WATCHER KLASIFIKASI] @{commenter}: {reply_kind} → {aksi}")
+
+            if reply_kind == "tidak_sopan":
+                print(f"  [WATCHER] ⚠ Balasan kasar/tidak sopan dari @{commenter}: "
+                      f"'{reply_text[:60]}…' — tidak dibalas")
+                if blacklist_impolite:
+                    # Format disamakan dengan yang dibaca filter blacklist di
+                    # auto_commenter (lowercase, tanpa "@" di depan)
+                    _auto_blacklist(commenter.strip().lstrip("@").lower())
+                else:
+                    print("  [WATCHER] auto_blacklist_impolite=False — skip tanpa blacklist")
+                _mark_replied(rid, "SKIP_TIDAK_SOPAN")
+                continue
+
+            if reply_kind == "tidak_jelas":
+                resp_text = generate_clarification_reply(reply_text, our_comment)
+            else:
+                resp_text = generate_watcher_reply(reply_text, our_comment, orig_cap)
             if not resp_text:
                 print("  [WATCHER] Gagal generate balasan, skip.")
                 continue

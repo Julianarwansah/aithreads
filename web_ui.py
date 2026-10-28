@@ -92,6 +92,26 @@ def _terminate(pidfile):
     except ProcessLookupError:
         pass
     Path(pidfile).unlink(missing_ok=True)
+    # Tunggu proses benar-benar keluar sebelum melapor sukses. pidfile sudah
+    # dihapus, jadi Start yang diklik 1-2 detik kemudian melihat "Tidak berjalan"
+    # dan meluncurkan instance kedua yang paralel dengan proses lama yang masih
+    # shutdown — dua bot bisa mengirim komentar ganda.
+    for _ in range(50):
+        try:
+            rpid, _ = os.waitpid(pid, os.WNOHANG)
+            if rpid == pid:
+                return {"ok": True}
+        except ChildProcessError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"ok": True}
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     return {"ok": True}
 
 # ── watchdog thread ───────────────────────────────────────────────────────────
@@ -1013,8 +1033,26 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="sec-desc">Bot poster membuat postingan original di Threads secara berkala. Bisa dijalankan bersamaan dengan commenter.</div>
       <div class="fg">
         <label>Interval Posting <span class="rv" id="rv-pint">48</span> jam</label>
-        <input type="range" class="fi" id="s-pint" min="12" max="168" value="48" oninput="rv('rv-pint',this.value)">
-        <div class="hint">Jeda antara satu postingan ke postingan berikutnya.</div>
+        <input type="range" class="fi" id="s-pint" min="0" max="168" value="48" oninput="rv('rv-pint',this.value)">
+        <div class="hint">Jeda antara satu postingan ke postingan berikutnya. <b>0 = interval nonaktif</b> — frekuensi diatur sepenuhnya oleh Kuota Harian di bawah.</div>
+      </div>
+      <div class="fg">
+        <label>Kuota Postingan per Hari <span class="rv" id="rv-pquota">5</span> post</label>
+        <input type="range" class="fi" id="s-pquota" min="0" max="20" value="5" oninput="rv('rv-pquota',this.value)">
+        <div class="hint">Batas maksimal postingan dalam satu hari kalender, dihitung ulang tiap tengah malam. <b>0 = tanpa batas</b> (tidak disarankan — berisiko terdeteksi spam oleh Meta).</div>
+      </div>
+      <div class="fg">
+        <label>Jarak Minimum Antar Postingan <span class="rv" id="rv-pgap">120</span> menit</label>
+        <input type="range" class="fi" id="s-pgap" min="0" max="720" step="15" value="120" oninput="rv('rv-pgap',this.value)">
+        <div class="hint">Pengaman anti-menumpuk: dua postingan tidak mungkin keluar lebih rapat dari ini, walau sedang jam ramai dan kuota masih ada. <b>0 = nonaktif</b> (tidak disarankan).</div>
+      </div>
+      <div class="fg">
+        <label>Hanya Posting di Jam Ramai</label>
+        <select class="fi" id="s-ppeak">
+          <option value="true">Aktif — tunggu sampai jam ramai (dari data aktivitas nyata)</option>
+          <option value="false">Nonaktif — posting kapan pun selama jam aktif</option>
+        </select>
+        <div class="hint">Jam ramai dihitung otomatis dari riwayat balasan 7 hari terakhir. Kalau belum ada data, poster memakai jam aktif biasa supaya tidak macet.</div>
       </div>
       <div class="fg">
         <label>Topik (satu per baris)</label>
@@ -1022,6 +1060,28 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
         <div class="hint">Bot akan memilih satu topik secara acak tiap kali posting.</div>
       </div>
       <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm6"></span></div>
+    </div>
+
+    <!-- Kualitas komentar AI -->
+    <div class="ss" id="ss-quality">
+      <div class="sec-title">Kualitas Komentar AI</div>
+      <div class="sec-desc">Setiap draf dinilai LLM pada tiga dimensi — natural, jelas, dan sopan. Yang di bawah ambang akan di-generate ulang, dan kalau tetap jelek akan dibuang sekaligus dijadikan contoh negatif agar polanya tidak terulang.</div>
+      <div class="fg">
+        <label>Skor Minimum Lolos <span class="rv" id="rv-qmin">6</span> / 10</label>
+        <input type="range" class="fi" id="s-qmin" min="0" max="10" value="6" oninput="rv('rv-qmin',this.value)">
+        <div class="hint">Diterapkan pada nilai <b>terendah</b> dari tiga dimensi. 0 = gate dimatikan (semua draf lolos).</div>
+      </div>
+      <div class="fg">
+        <label>Percobaan Ulang Maksimal <span class="rv" id="rv-qretry">2</span>×</label>
+        <input type="range" class="fi" id="s-qretry" min="0" max="5" value="2" oninput="rv('rv-qretry',this.value)">
+        <div class="hint">Tiap percobaan menambah satu panggilan LLM (~10 detik). 0 = langsung buang tanpa mencoba ulang.</div>
+      </div>
+      <div class="fg">
+        <label>Contoh Buruk di Prompt <span class="rv" id="rv-qneg">3</span> buah</label>
+        <input type="range" class="fi" id="s-qneg" min="0" max="10" value="3" oninput="rv('rv-qneg',this.value)">
+        <div class="hint">Jumlah komentar lama berkualitas rendah yang disuntikkan ke prompt sebagai "jangan kayak gini". 0 = fitur belajar dari contoh buruk dimatikan.</div>
+      </div>
+      <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm8"></span></div>
     </div>
 
     <!-- Sistem -->
@@ -1047,6 +1107,22 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="fg">
         <label>Interval Cek Balasan <span class="rv" id="rv-arc">30</span> menit</label>
         <input type="range" class="fi" id="s-arc" min="10" max="120" value="30" oninput="rv('rv-arc',this.value)">
+      </div>
+      <div class="fg">
+        <label>Penyaring Balasan Masuk</label>
+        <select class="fi" id="s-rcls">
+          <option value="true">Aktif — bedakan balasan jelas / tidak jelas / tidak sopan</option>
+          <option value="false">Nonaktif — balas semua seperti biasa</option>
+        </select>
+        <div class="hint">Balasan tidak jelas dijawab dengan klarifikasi singkat; balasan tidak sopan dilewati. Menambah satu panggilan LLM per balasan.</div>
+      </div>
+      <div class="fg">
+        <label>Blacklist Otomatis Pengirim Kasar</label>
+        <select class="fi" id="s-rbl">
+          <option value="false">Nonaktif — lewati saja, jangan blacklist (disarankan)</option>
+          <option value="true">Aktif — tambahkan username ke blacklist permanen</option>
+        </select>
+        <div class="hint">Blokir permanen diputuskan dari satu penilaian LLM, jadi berisiko salah orang. Masih bisa dibatalkan manual dari menu Blacklist.</div>
       </div>
       <div class="fg" style="margin-top:14px">
         <label>Watchdog Auto-Restart</label>
@@ -1686,10 +1762,18 @@ async function loadSettings(){
     document.getElementById('s-qbin').value=s.qoder_bin||'';
     document.getElementById('s-qmdl').value=s.qoder_model||'';
     setSlider('s-pint','rv-pint',s.poster_interval_hours,48);
+    setSlider('s-pquota','rv-pquota',s.poster_daily_quota,5);
+    setSlider('s-pgap','rv-pgap',s.poster_min_gap_minutes,120);
+    document.getElementById('s-ppeak').value=s.poster_peak_only===false?'false':'true';
     document.getElementById('s-ptopics').value=(s.poster_topics||[]).join('\n');
+    setSlider('s-qmin','rv-qmin',s.quality_min_score,6);
+    setSlider('s-qretry','rv-qretry',s.quality_max_retries,2);
+    setSlider('s-qneg','rv-qneg',s.quality_negative_examples,3);
     document.getElementById('s-like').value=s.like_before_comment===false?'false':'true';
     document.getElementById('s-ar').value=s.auto_reply_enabled?'true':'false';
     setSlider('s-arc','rv-arc',s.auto_reply_check_minutes,30);
+    document.getElementById('s-rcls').value=s.reply_classify_enabled===false?'false':'true';
+    document.getElementById('s-rbl').value=s.auto_blacklist_impolite?'true':'false';
     document.getElementById('s-wd').value=s.watchdog_enabled===false?'false':'true';
     extraIt=[...(s.it_ai_keywords_extra||[])];
     extraLk=[...(s.loker_keywords_extra||[])];
@@ -1736,10 +1820,18 @@ async function saveAll(){
     qoder_bin:             document.getElementById('s-qbin').value.trim(),
     qoder_model:           document.getElementById('s-qmdl').value.trim(),
     poster_interval_hours: +document.getElementById('s-pint').value,
+    poster_daily_quota:    +document.getElementById('s-pquota').value,
+    poster_min_gap_minutes:+document.getElementById('s-pgap').value,
+    poster_peak_only:      document.getElementById('s-ppeak').value==='true',
     poster_topics:         topics.length?topics:undefined,
+    quality_min_score:         +document.getElementById('s-qmin').value,
+    quality_max_retries:       +document.getElementById('s-qretry').value,
+    quality_negative_examples: +document.getElementById('s-qneg').value,
     like_before_comment:       document.getElementById('s-like').value==='true',
     auto_reply_enabled:        document.getElementById('s-ar').value==='true',
     auto_reply_check_minutes:  +document.getElementById('s-arc').value,
+    reply_classify_enabled:    document.getElementById('s-rcls').value==='true',
+    auto_blacklist_impolite:   document.getElementById('s-rbl').value==='true',
     watchdog_enabled:          document.getElementById('s-wd').value==='true',
     it_ai_keywords_extra:  extraIt,
     loker_keywords_extra:  extraLk,
@@ -1750,7 +1842,7 @@ async function saveAll(){
     const d=await r.json();
     if(d.ok){
       toast('Pengaturan disimpan!');
-      ['sm1','sm2','sm3','sm4','sm5','sm6','sm7'].forEach(id=>{const e=document.getElementById(id);if(e){e.textContent='Tersimpan ✓';setTimeout(()=>e.textContent='',3000);}});
+      ['sm1','sm2','sm3','sm4','sm5','sm6','sm7','sm8'].forEach(id=>{const e=document.getElementById(id);if(e){e.textContent='Tersimpan ✓';setTimeout(()=>e.textContent='',3000);}});
     } else toast('Gagal: '+d.msg,'err');
   }catch(e){toast('Error: '+e,'err');}
 }
@@ -2390,8 +2482,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self):
-        n = int(self.headers.get("Content-Length",0))
-        return json.loads(self.rfile.read(n)) if n else {}
+        # Payload rusak / Content-Length tidak valid tidak boleh menjatuhkan
+        # koneksi — kembalikan {} supaya handler menjawab dengan JSON normal.
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if n <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -2827,7 +2929,10 @@ class Handler(BaseHTTPRequestHandler):
             data = self._body()
             username = (data.get("username") or "").strip().lstrip("@").lower()
             cfg = config_loader.load()
-            bl  = [u for u in cfg.get("blacklisted_accounts", []) if u != username]
+            # Cocokkan case-insensitive: jalur auto-blacklist di reply_watcher
+            # menyimpan username apa adanya, jadi entri bisa berhuruf kapital.
+            bl  = [u for u in cfg.get("blacklisted_accounts", [])
+                   if str(u).strip().lstrip("@").lower() != username]
             config_loader.save({"blacklisted_accounts": bl})
             self._json(200, {"ok": True, "blacklist": bl})
 

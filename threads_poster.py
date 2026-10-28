@@ -9,7 +9,7 @@ import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -17,6 +17,7 @@ load_dotenv()
 
 import config_loader
 import llm_router
+import reply_cache
 import stats_tracker
 from auto_commenter import _heuristic_score, _score_naturalness
 from services.session_manager import SessionManager, SessionStatus
@@ -37,6 +38,12 @@ logger = logging.getLogger(__name__)
 _DIR              = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR         = os.getenv("PROFILE_DIR", _DIR)
 _LAST_POST_FILE   = os.path.join(_DATA_DIR, "poster_last_post.json")
+_DAILY_COUNT_FILE = os.path.join(_DATA_DIR, "poster_daily_count.json")
+
+# Interval cek ulang saat menunggu jam ramai / kuota. Tidak boleh 0 (busy-loop) dan
+# tidak boleh berjam-jam supaya jam ramai berikutnya tidak kelewat.
+_SCHEDULE_CHECK_SECONDS = 900    # 15 menit
+_QUOTA_RECHECK_SECONDS  = 1800   # 30 menit — dipakai saat kuota harian sudah habis
 
 POST_ENDPOINT = "https://www.threads.com/api/v1/media/configure_text_only_post/"
 
@@ -300,18 +307,135 @@ def _read_last_post_time() -> float:
 
 
 def _write_last_post_time():
-    from pathlib import Path
-    Path(_LAST_POST_FILE).write_text(
-        json.dumps({"ts": time.time()}, ensure_ascii=False), encoding="utf-8"
-    )
+    try:
+        from pathlib import Path
+        Path(_LAST_POST_FILE).write_text(
+            json.dumps({"ts": time.time()}, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        # Gagal tulis tidak boleh membatalkan siklus: postingan sudah terkirim
+        logger.warning("Gagal menyimpan waktu post terakhir: %s", e)
 
 
-def is_active_hours() -> bool:
+# ── jadwal & kuota harian ─────────────────────────────────────────────────────
+def _cfg_number(cfg: dict, key: str, default: float) -> float:
+    """Baca angka dari config tanpa melempar exception (nilai rusak → default)."""
+    try:
+        return float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        logger.warning("Config '%s' bukan angka — pakai default %s", key, default)
+        return float(default)
+
+
+def _today_str(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime("%Y-%m-%d")
+
+
+def _read_daily_count(now: datetime | None = None) -> int:
+    """
+    Jumlah postingan pada hari kalender berjalan.
+
+    Reset harian terjadi di sini: kalau "date" di file bukan hari ini (atau filenya
+    hilang/rusak), dihitung 0 — jadi file baru ditulis ulang saat post sukses berikutnya.
+    """
+    try:
+        from pathlib import Path
+        p = Path(_DAILY_COUNT_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if str(data.get("date", "")) == _today_str(now):
+                return max(0, int(data.get("count", 0)))
+    except Exception as e:
+        logger.warning("Gagal baca kuota harian (%s) — dianggap 0.", e)
+    return 0
+
+
+def _write_daily_count(count: int, now: datetime | None = None) -> bool:
+    try:
+        from pathlib import Path
+        Path(_DAILY_COUNT_FILE).write_text(
+            json.dumps({"date": _today_str(now), "count": max(0, int(count))}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return True
+    except Exception as e:
+        logger.warning("Gagal simpan kuota harian: %s", e)
+        return False
+
+
+def _increment_daily_count(now: datetime | None = None) -> int:
+    """Naikkan counter kuota harian. Hanya dipanggil setelah posting benar-benar sukses."""
+    used = _read_daily_count(now) + 1
+    _write_daily_count(used, now)
+    return used
+
+
+def get_peak_hours_safe() -> set:
+    """Jam ramai dari data balasan 7 hari terakhir; set kosong kalau belum ada data/gagal."""
+    try:
+        return {int(h) for h in reply_cache.get_peak_hours(top_n=5)}
+    except Exception as e:
+        logger.warning("Gagal baca jam ramai: %s", e)
+        return set()
+
+
+def _format_hours(hours) -> str:
+    return ", ".join(f"{int(h):02d}:00" for h in sorted(hours))
+
+
+def _next_peak_hour(peaks: set, now: datetime) -> int | None:
+    """Jam ramai terdekat sesudah sekarang; kalau sudah lewat semua → jam pertama besok."""
+    if not peaks:
+        return None
+    ahead = sorted(h for h in peaks if h > now.hour)
+    return ahead[0] if ahead else min(peaks)
+
+
+def _seconds_until_midnight(now: datetime | None = None) -> float:
+    now      = now or datetime.now()
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60.0, (midnight - now).total_seconds())
+
+
+def is_active_hours(now: datetime | None = None) -> bool:
     cfg   = config_loader.load()
-    h     = datetime.now().hour
-    start = int(cfg.get("active_start_hour", 7))
-    end   = int(cfg.get("active_end_hour",   23))
+    h     = (now or datetime.now()).hour
+    start = int(_cfg_number(cfg, "active_start_hour", 7))
+    end   = int(_cfg_number(cfg, "active_end_hour",   23))
     return start <= h < end
+
+
+def is_post_window(now: datetime | None = None) -> tuple[bool, str]:
+    """
+    Boleh posting sekarang atau tidak, plus alasan siap-log.
+
+    Gate: jam aktif selalu dihormati, lalu jam ramai kalau poster_peak_only aktif.
+    Kalau data jam ramai belum ada (peak set kosong), fallback ke jam aktif supaya
+    poster tidak macet selamanya menunggu data yang belum pernah terkumpul.
+    """
+    cfg = config_loader.load()
+    now = now or datetime.now()
+    h   = now.hour
+
+    if not is_active_hours(now):
+        start = int(_cfg_number(cfg, "active_start_hour", 7))
+        end   = int(_cfg_number(cfg, "active_end_hour",   23))
+        return False, f"Di luar jam aktif ({start:02d}:00–{end:02d}:00)"
+
+    if not bool(cfg.get("poster_peak_only", True)):
+        return True, f"Jam aktif {h:02d}:xx (gate jam ramai nonaktif)"
+
+    peaks = get_peak_hours_safe()
+    if not peaks:
+        return True, (f"Jam aktif {h:02d}:xx — data jam ramai masih kosong, "
+                      "fallback ke jam aktif (active_start_hour/active_end_hour)")
+    if h in peaks:
+        return True, f"Jam ramai {h:02d}:xx"
+
+    nxt     = _next_peak_hour(peaks, now)
+    nxt_txt = f"{nxt:02d}:00" if nxt is not None else "besok"
+    return False, (f"Sekarang {h:02d}:xx bukan jam ramai — menunggu {nxt_txt} "
+                   f"(jam ramai: {_format_hours(peaks)})")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -327,6 +451,16 @@ def main():
     print("[INFO] Qoder CLI OK.")
     print(f"[INFO] Alur: scan tren → generate post natural → kirim")
 
+    cfg0    = config_loader.load()
+    hours0  = _cfg_number(cfg0, "poster_interval_hours", 48)
+    quota0  = int(_cfg_number(cfg0, "poster_daily_quota", 5))
+    peak0   = bool(cfg0.get("poster_peak_only", True))
+    gap0    = int(_cfg_number(cfg0, "poster_min_gap_minutes", 120))
+    print(f"[INFO] Jadwal: {'interval nonaktif' if hours0 <= 0 else f'interval {hours0:.0f} jam'} | "
+          f"kuota harian {quota0 if quota0 > 0 else 'tanpa batas'} | "
+          f"jarak minimum {gap0 if gap0 > 0 else 'nonaktif'} menit | "
+          f"{'hanya jam ramai' if peak0 else 'jam aktif saja'}")
+
     sm = SessionManager()
     if not sm.load_session() or sm.validate_session().status != SessionStatus.VALID:
         print("[ERROR] Session invalid.")
@@ -337,26 +471,55 @@ def main():
     while True:
         try:
             cfg   = config_loader.load()
-            start = int(cfg.get("active_start_hour", 7))
-            end   = int(cfg.get("active_end_hour",   23))
-            hours = float(cfg.get("poster_interval_hours", 48))
+            hours = _cfg_number(cfg, "poster_interval_hours", 48)
+            quota = int(_cfg_number(cfg, "poster_daily_quota", 5))
 
-            # Cek interval sejak postingan terakhir — tahan double-post saat restart
-            last_ts    = _read_last_post_time()
-            elapsed_hr = (time.time() - last_ts) / 3600
-            if last_ts > 0 and elapsed_hr < hours:
-                remaining_hr = hours - elapsed_hr
-                print(f"[INFO] Belum saatnya posting (sisa {remaining_hr:.1f} jam dari interval {hours:.0f} jam).")
-                time.sleep(min(3600, int(remaining_hr * 3600)))
+            # Interval 0 (atau negatif) = nonaktif: seluruh cek elapsed_hr dilewati,
+            # cadence diserahkan ke kuota harian + jam ramai di bawah.
+            if hours > 0:
+                # Cek interval sejak postingan terakhir — tahan double-post saat restart
+                last_ts    = _read_last_post_time()
+                elapsed_hr = (time.time() - last_ts) / 3600
+                if last_ts > 0 and elapsed_hr < hours:
+                    remaining_hr = hours - elapsed_hr
+                    print(f"[INFO] Belum saatnya posting (sisa {remaining_hr:.1f} jam dari interval {hours:.0f} jam).")
+                    time.sleep(min(3600, max(60, int(remaining_hr * 3600))))
+                    continue
+
+            # Gate jam ramai (fallback ke jam aktif kalau datanya belum ada)
+            allowed, reason = is_post_window()
+            if not allowed:
+                print(f"[SCHEDULE] {reason} — cek lagi dalam {_SCHEDULE_CHECK_SECONDS // 60} menit…")
+                time.sleep(_SCHEDULE_CHECK_SECONDS)
                 continue
 
-            if not is_active_hours():
-                print(f"[SCHEDULE] Di luar jam aktif ({start:02d}:00–{end:02d}:00), tidur 30 menit…")
-                time.sleep(1800)
+            # Gate kuota harian (0 = tanpa batas)
+            posted_today = _read_daily_count()
+            if quota > 0 and posted_today >= quota:
+                wait = min(_seconds_until_midnight(), _QUOTA_RECHECK_SECONDS)
+                sisa = max(0, quota - posted_today)
+                print(f"[QUOTA] Kuota harian habis ({posted_today}/{quota}, sisa {sisa}) hari "
+                      f"{_today_str()} — posting lanjut setelah tengah malam, cek lagi ±{wait / 60:.0f} menit.")
+                time.sleep(wait)
                 continue
+
+            # Gate jarak minimum antar-post (0 = nonaktif). Sengaja di luar blok
+            # `hours > 0` supaya tetap berlaku saat interval dimatikan — inilah rem
+            # yang mencegah beberapa postingan keluar berdekatan dalam satu jam ramai.
+            min_gap = int(_cfg_number(cfg, "poster_min_gap_minutes", 120))
+            if min_gap > 0:
+                gap_ts = _read_last_post_time()
+                elapsed_min = (time.time() - gap_ts) / 60
+                if gap_ts > 0 and elapsed_min < min_gap:
+                    wait = min(_SCHEDULE_CHECK_SECONDS, max(60, int((min_gap - elapsed_min) * 60)))
+                    print(f"[GAP] Jarak minimum {min_gap} menit belum terpenuhi "
+                          f"(baru {elapsed_min:.0f} menit sejak post terakhir) — cek lagi ±{wait // 60} menit.")
+                    time.sleep(wait)
+                    continue
 
             print("\n" + "="*50)
-            print("[INFO] Memulai siklus posting…")
+            quota_txt = f"{posted_today}/{quota}" if quota > 0 else f"{posted_today} (tanpa batas)"
+            print(f"[INFO] Memulai siklus posting… ({reason} | kuota hari ini {quota_txt})")
 
             # Scan + generate
             content = generate_thread_content(session)
@@ -374,12 +537,23 @@ def main():
                 print("  >> Berhasil memposting!")
                 stats_tracker.increment("posts_created")
                 _write_last_post_time()
+                # Counter kuota hanya naik kalau posting benar-benar sukses
+                used = _increment_daily_count()
+                if quota > 0:
+                    print(f"  [QUOTA] {used}/{quota} postingan hari ini.")
             else:
                 print("  >> Gagal posting.")
                 stats_tracker.increment("post_failures")
 
-            print(f"\n[INFO] Poster tidur {hours:.0f} jam hingga postingan berikutnya…")
-            time.sleep(int(hours * 3600))
+            # Tidur akhir siklus: interval lama kalau masih dipakai, kalau tidak
+            # cukup interval cek ulang pendek agar jam ramai berikutnya tidak kelewat.
+            if hours > 0:
+                nap = max(60, int(hours * 3600))
+                print(f"\n[INFO] Poster tidur {nap / 3600:.1f} jam hingga postingan berikutnya…")
+            else:
+                nap = _SCHEDULE_CHECK_SECONDS
+                print(f"\n[INFO] Interval nonaktif — cek jam ramai & kuota lagi dalam {nap // 60} menit…")
+            time.sleep(nap)
 
         except Exception as e:
             stats_tracker.log_error(str(e))

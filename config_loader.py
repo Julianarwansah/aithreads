@@ -36,7 +36,10 @@ DEFAULTS = {
 
     # poster
     "poster_enabled":       False,
-    "poster_interval_hours": 48,        # jeda antar postingan
+    "poster_interval_hours": 48,        # jeda antar postingan; 0 = nonaktif (pakai kuota harian)
+    "poster_daily_quota":   5,          # maksimal postingan per hari kalender; 0 = tanpa batas
+    "poster_min_gap_minutes": 120,      # jarak minimum antar postingan; 0 = nonaktif
+    "poster_peak_only":     True,       # hanya boleh posting di jam ramai (reply_cache.get_peak_hours)
     "poster_topics": [                  # topik yang dirotasi
         "ngoding dan debugging",
         "AI dan tools terbaru",
@@ -44,6 +47,15 @@ DEFAULTS = {
         "tech opinion",
         "startup dan produk digital",
     ],
+
+    # quality gate komentar — learning loop 3 dimensi (natural / jelas / sopan)
+    "quality_min_score":         6,     # ambang lolos per dimensi, skala 1-10
+    "quality_max_retries":       2,     # generate ulang maks sebelum komentar di-skip
+    "quality_negative_examples": 3,     # jumlah contoh buruk yang disuntik ke prompt
+
+    # klasifikasi balasan masuk (reply_watcher)
+    "reply_classify_enabled":  True,
+    "auto_blacklist_impolite": False,   # permanen memblokir orang dari 1 penilaian LLM — opt-in
 
     # blacklist akun (username tanpa @)
     "blacklisted_accounts": [],
