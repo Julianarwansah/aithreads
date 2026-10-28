@@ -1,12 +1,15 @@
-import json
 import os
-import threading
 from datetime import datetime
+
+import safe_store
 
 _DIR       = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR  = os.getenv("PROFILE_DIR", _DIR)
 STATS_FILE = os.path.join(_DATA_DIR, "stats.json")
-_lock = threading.Lock()
+
+# Cuplikan komentar disimpan di stats.json yang dibaca-tulis oleh banyak proses;
+# tanpa batas, satu komentar panjang ikut tersalin setiap kali file ditulis ulang.
+MAX_COMMENT_TEXT = 300
 
 DEFAULT_STATS = {
     "system_start_time": "",
@@ -20,6 +23,7 @@ DEFAULT_STATS = {
     "trend_posts_selected": 0,
     "trend_fallbacks": 0,
     "last_comment_time": "",
+    "last_comment_text": "",
     "last_post_time": "",
     "last_error": "",
     "last_error_time": "",
@@ -37,73 +41,87 @@ DEFAULT_STATS = {
     "job_dms_sent": 0,
 }
 
-def _load_stats():
-    if not os.path.exists(STATS_FILE):
-        return DEFAULT_STATS.copy()
-    try:
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # Ensure all keys exist
-            for k, v in DEFAULT_STATS.items():
-                if k not in data:
-                    data[k] = v
-            return data
-    except Exception:
-        return DEFAULT_STATS.copy()
 
-def _save_stats(data):
-    try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+def _with_defaults(data):
+    """Pastikan semua key DEFAULT_STATS ada, tanpa menimpa nilai yang sudah tersimpan."""
+    if not isinstance(data, dict):
+        return DEFAULT_STATS.copy()
+    for k, v in DEFAULT_STATS.items():
+        data.setdefault(k, v)
+    return data
+
+
+def _update(mutator):
+    """
+    Read-modify-write atomik yang aman dipanggil dari proses mana pun.
+
+    Semua penulis stats.json (bot, poster, watcher, job hunter, web_ui) lewat sini,
+    jadi counter tidak lagi saling menimpa.
+    """
+    def _apply(stats):
+        stats = _with_defaults(stats)
+        mutator(stats)
+        return stats
+
+    return safe_store.update_json(STATS_FILE, _apply, DEFAULT_STATS.copy())
+
 
 def get_current_time_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
 def init_system_start():
-    with _lock:
-        stats = _load_stats()
+    def _set(stats):
         stats["system_start_time"] = get_current_time_str()
-        _save_stats(stats)
+    _update(_set)
+
 
 def update_heartbeat(timestamp: float):
-    with _lock:
-        stats = _load_stats()
+    def _set(stats):
         stats["last_heartbeat"] = timestamp
-        _save_stats(stats)
+    _update(_set)
+
 
 def increment(key: str):
-    with _lock:
-        stats = _load_stats()
-        if key in stats:
-            stats[key] += 1
-        else:
-            # Allow dynamic LinkedIn keys (li_*) even if not in DEFAULT_STATS
-            stats[key] = 1
+    """Naikkan counter dan kembalikan total terbarunya.
 
-        # Auto-update corresponding timestamps
-        time_str = get_current_time_str()
+    Total yang dikembalikan adalah angka seumur hidup dari stats.json, jadi
+    pemanggil (mis. log watchdog di web_ui) bisa menampilkan angka yang tidak
+    ikut ter-reset saat prosesnya di-restart.
+    """
+    now = get_current_time_str()
+
+    def _inc(stats):
+        stats[key] = stats.get(key, 0) + 1
         if key == "comments_sent":
-            stats["last_comment_time"] = time_str
+            stats["last_comment_time"] = now
         elif key == "posts_created":
-            stats["last_post_time"] = time_str
+            stats["last_post_time"] = now
 
-        _save_stats(stats)
+    return _update(_inc).get(key, 0)
+
 
 def log_comment(text: str):
-    with _lock:
-        stats = _load_stats()
-        stats["last_comment_time"] = get_current_time_str()
-        _save_stats(stats)
+    """Catat waktu dan cuplikan komentar terakhir yang berhasil dikirim."""
+    stamp = get_current_time_str()
+    snippet = str(text or "")[:MAX_COMMENT_TEXT]
+
+    def _set(stats):
+        stats["last_comment_time"] = stamp
+        stats["last_comment_text"] = snippet
+
+    _update(_set)
+
 
 def log_error(error_msg: str):
-    with _lock:
-        stats = _load_stats()
+    stamp = get_current_time_str()
+
+    def _set(stats):
         stats["last_error"] = str(error_msg)
-        stats["last_error_time"] = get_current_time_str()
-        _save_stats(stats)
+        stats["last_error_time"] = stamp
+
+    _update(_set)
+
 
 def get_stats():
-    with _lock:
-        return _load_stats()
+    return _with_defaults(safe_store.read_json(STATS_FILE, DEFAULT_STATS.copy()))

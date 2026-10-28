@@ -37,6 +37,24 @@ def _ensure_dir():
     os.makedirs(ACCOUNTS_DIR, exist_ok=True)
 
 
+def account_path(name):
+    """
+    Resolusi nama akun menjadi path di dalam ACCOUNTS_DIR.
+
+    Mengembalikan None kalau hasil resolusinya keluar dari ACCOUNTS_DIR. Nama akun
+    datang dari URL (/api/accounts/<name>/...) dan os.path.join tidak menormalkan
+    "..", jadi tanpa penjaga ini delete_account("..") akan shutil.rmtree() root
+    project. realpath dipakai supaya symlink tidak bisa dipakai memotong keluar.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return None
+    root = os.path.realpath(ACCOUNTS_DIR)
+    candidate = os.path.realpath(os.path.join(root, name))
+    if candidate == root or not candidate.startswith(root + os.sep):
+        return None
+    return candidate
+
+
 def list_accounts() -> list:
     """Kembalikan list dict {name, username, path} semua akun."""
     _ensure_dir()
@@ -80,7 +98,9 @@ def create_account(name: str, creds: dict) -> dict:
 
 def update_credentials(name: str, creds: dict) -> dict:
     """Update .env credentials akun yang sudah ada."""
-    path = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return {"ok": False, "msg": "Nama akun tidak valid"}
     if not os.path.isdir(path):
         return {"ok": False, "msg": f"Akun '{name}' tidak ditemukan"}
     with _lock:
@@ -95,7 +115,9 @@ def update_credentials(name: str, creds: dict) -> dict:
 
 def delete_account(name: str) -> dict:
     """Hapus profil akun beserta semua datanya."""
-    path = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return {"ok": False, "msg": "Nama akun tidak valid"}
     if not os.path.isdir(path):
         return {"ok": False, "msg": f"Akun '{name}' tidak ditemukan"}
     with _lock:
@@ -108,7 +130,9 @@ def get_account_env(name: str) -> dict:
     Kembalikan dict env untuk subprocess akun ini.
     Berisi semua credentials dari .env + PROFILE_DIR.
     """
-    path = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return {}
     creds = _dotenv_values(os.path.join(path, ".env"))
     return {**creds, "PROFILE_DIR": path}
 
@@ -116,7 +140,9 @@ def get_account_env(name: str) -> dict:
 def get_account_config(name: str) -> dict:
     """Baca config.json akun, fallback ke DEFAULTS config_loader."""
     import config_loader
-    path     = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return config_loader.DEFAULTS.copy()
     cfg_file = os.path.join(path, "config.json")
     try:
         if os.path.exists(cfg_file):
@@ -132,7 +158,9 @@ def get_account_config(name: str) -> dict:
 
 def save_account_config(name: str, partial: dict) -> bool:
     """Merge partial dict ke config.json akun."""
-    path     = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return False
     os.makedirs(path, exist_ok=True)
     cfg_file = os.path.join(path, "config.json")
     with _lock:
@@ -148,7 +176,9 @@ def save_account_config(name: str, partial: dict) -> bool:
 
 def get_account_stats(name: str) -> dict:
     """Baca stats.json akun."""
-    path       = os.path.join(ACCOUNTS_DIR, name)
+    path = account_path(name)
+    if path is None:
+        return {}
     stats_file = os.path.join(path, "stats.json")
     try:
         if os.path.exists(stats_file):

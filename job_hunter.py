@@ -13,7 +13,6 @@ Alur:
 import json
 import logging
 import os
-import re
 import sys
 import time
 import random
@@ -30,9 +29,9 @@ import llm_router
 import config_loader
 import stats_tracker
 from auto_commenter import (
-    process_timeline, get_fresh_tokens, fetch_timeline,
+    get_fresh_tokens,
     load_latest_query_config, BASE_HEADERS, REPLY_ENDPOINT,
-    SessionExpiredError, RateLimitError, _rate_backoff,
+    SessionExpiredError, RateLimitError,
 )
 from services.session_manager import SessionManager, SessionStatus
 
@@ -565,7 +564,7 @@ def run_once(session) -> int:
         # Generate komentar
         comment_text = generate_application_comment(caption, job_type, wants_dm_flag, cv_req)
         if not comment_text:
-            logger.warning(f"  [JH] LLM gagal generate komentar, skip")
+            logger.warning("  [JH] LLM gagal generate komentar, skip")
             continue
 
         logger.info(f"  [JH] KOMENTAR: {comment_text}")
@@ -582,7 +581,7 @@ def run_once(session) -> int:
             raise
 
         if not comment_id:
-            logger.warning(f"  [JH] Komentar gagal terkirim")
+            logger.warning("  [JH] Komentar gagal terkirim")
             stats_tracker.increment("job_comment_failures")
             continue
 
@@ -616,9 +615,9 @@ def run_once(session) -> int:
                     entry["dm_id"]   = dm_id
                     entry["dm_text"] = dm_text
                 else:
-                    logger.warning(f"  [JH] DM gagal")
+                    logger.warning("  [JH] DM gagal")
         elif wants_dm_flag:
-            logger.info(f"  [JH] Post minta DM tapi user_id tidak tersedia, skip DM")
+            logger.info("  [JH] Post minta DM tapi user_id tidak tersedia, skip DM")
 
         _mark_applied(post_id, entry)
         applied_count += 1

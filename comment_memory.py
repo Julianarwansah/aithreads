@@ -4,17 +4,20 @@ comment_memory.py -- Persistent memory komentar bot.
 Menyimpan histori komentar kita sendiri + mendeteksi pola
 agar AI terus berkembang dan tidak repetitif.
 """
-import json
 import os
 import re
 import threading
 import time
-from pathlib import Path
+
+import safe_store
 
 _DIR        = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR   = os.getenv("PROFILE_DIR", _DIR)
 MEMORY_FILE = os.path.join(_DATA_DIR, "comment_memory.json")
 MAX_ENTRIES = 100
+# Lock in-proses untuk jalur baca. Jalur tulis memakai safe_store.file_lock() yang
+# berlaku antar-proses; lock ini tetap dipertahankan karena banyak fungsi analisis
+# di bawah membaca lewat _load() dan sebelumnya mengandalkan _lock.
 _lock       = threading.Lock()
 
 # Draf yang DIBUANG quality gate disimpan terpisah, bukan di MEMORY_FILE. Memory
@@ -102,19 +105,12 @@ def _detect_topic_bucket(caption: str) -> str:
 
 # ── storage ───────────────────────────────────────────────────────────────────
 def _load() -> list:
-    try:
-        if Path(MEMORY_FILE).exists():
-            data = json.loads(Path(MEMORY_FILE).read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-    except Exception:
-        pass
-    return []
+    data = safe_store.read_json(MEMORY_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def _save(data: list):
-    Path(MEMORY_FILE).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    safe_store.write_json(MEMORY_FILE, data)
 
 
 def save(caption: str, reply: str, post_sentiment: str = "info",
@@ -150,7 +146,7 @@ def save(caption: str, reply: str, post_sentiment: str = "info",
         entry["politeness"] = pol
         entry["impolite"] = pol < min_score
 
-    with _lock:
+    with safe_store.file_lock(MEMORY_FILE):
         data = _load()
         data.append(entry)
         if len(data) > MAX_ENTRIES:
@@ -159,13 +155,8 @@ def save(caption: str, reply: str, post_sentiment: str = "info",
 
 
 def _load_rejected() -> list:
-    try:
-        if Path(REJECTED_FILE).exists():
-            data = json.loads(Path(REJECTED_FILE).read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-    except Exception:
-        pass
-    return []
+    data = safe_store.read_json(REJECTED_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def save_rejected(caption: str, reply: str, scores: dict = None):
@@ -205,14 +196,12 @@ def save_rejected(caption: str, reply: str, scores: dict = None):
         entry["impolite"] = pol < min_score
 
     try:
-        with _lock:
+        with safe_store.file_lock(REJECTED_FILE):
             data = _load_rejected()
             data.append(entry)
             if len(data) > MAX_REJECTED:
                 data = data[-MAX_REJECTED:]
-            Path(REJECTED_FILE).write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            safe_store.write_json(REJECTED_FILE, data)
     except Exception:
         pass
 
@@ -250,7 +239,7 @@ def mark_engagement(reply_text: str, caption: str = ""):
     komentar identik yang dikirim ke dua post berbeda.
     """
     cap_prefix = caption[:80] if caption else ""
-    with _lock:
+    with safe_store.file_lock(MEMORY_FILE):
         data = _load()
         # cari dari belakang: exact text match + caption match
         for entry in reversed(data):
@@ -313,7 +302,7 @@ def build_memory_prompt(n: int = 8) -> str:
     # Hint engagement kalau ada
     engaged_count = sum(1 for e in recent if e.get("engaged"))
     if engaged_count:
-        text += f"\n(⭐ = komentar yang dapat balasan — pelajari polanya)"
+        text += "\n(⭐ = komentar yang dapat balasan — pelajari polanya)"
 
     # Engagement analytics — panduan berbasis data
     stats = get_engagement_stats()

@@ -17,7 +17,7 @@ import time
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -26,7 +26,7 @@ import llm_router
 import config_loader
 import stats_tracker
 from linkedin_commenter import fetch_feed, _should_comment, SessionExpiredError, RateLimitError
-from services.linkedin_session_manager import LinkedInAuth, SessionStatus
+from services.linkedin_session_manager import LinkedInAuth
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)

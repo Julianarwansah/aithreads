@@ -27,7 +27,7 @@ import llm_router
 import config_loader
 import stats_tracker
 from linkedin_commenter import (
-    _parse_reply, _quality_check, _heuristic_score,
+    _parse_reply, _quality_check,
     SessionExpiredError, RateLimitError,
 )
 from services.linkedin_session_manager import LinkedInAuth
@@ -318,7 +318,7 @@ def run_once(auth: LinkedInAuth):
             )
 
             if reply_text == "SKIP":
-                logger.info(f"  [LI_WATCHER] LLM SKIP reply ini")
+                logger.info("  [LI_WATCHER] LLM SKIP reply ini")
                 _mark_replied_watcher(reply_id, "SKIPPED")
                 continue
 

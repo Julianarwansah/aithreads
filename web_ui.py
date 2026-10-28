@@ -14,6 +14,7 @@ load_dotenv()
 import config_loader
 import growth_tracker
 import account_manager
+import web_security
 
 _DIR           = os.path.dirname(os.path.abspath(__file__))
 BOT_SCRIPT     = os.path.join(_DIR, "auto_commenter.py")
@@ -140,10 +141,8 @@ def _terminate(pidfile):
     return {"ok": True}
 
 # ── watchdog thread ───────────────────────────────────────────────────────────
-_watchdog_restart_count = 0
 
 def _watchdog_loop():
-    global _watchdog_restart_count
     tick = 0
     while True:
         time.sleep(30)
@@ -165,11 +164,10 @@ def _watchdog_loop():
         if Path(BOT_PID).exists() and not _is_alive(BOT_PID):
             Path(BOT_PID).unlink(missing_ok=True)
             _launch(BOT_SCRIPT, BOT_LOG, BOT_PID)
-            _watchdog_restart_count += 1
             import stats_tracker
-            stats_tracker.increment("watchdog_restarts")
+            total = stats_tracker.increment("watchdog_restarts")
             with open(BOT_LOG, "a") as f:
-                f.write(f"\n[WATCHDOG] Bot di-restart otomatis (total: {_watchdog_restart_count}×)\n")
+                f.write(f"\n[WATCHDOG] Bot di-restart otomatis (total: {total}×)\n")
         # Restart poster if enabled and crashed
         if cfg.get("poster_enabled") and Path(POSTER_PID).exists() and not _is_alive(POSTER_PID):
             Path(POSTER_PID).unlink(missing_ok=True)
@@ -193,7 +191,8 @@ def _watchdog_loop():
             if Path(a_bot_pid).exists() and not _is_alive(a_bot_pid):
                 Path(a_bot_pid).unlink(missing_ok=True)
                 _launch(BOT_SCRIPT, os.path.join(apath, "bot.log"), a_bot_pid, extra_env=aenv)
-                _watchdog_restart_count += 1
+                import stats_tracker
+                stats_tracker.increment("watchdog_restarts")
             if acfg.get("poster_enabled") and Path(a_poster_pid).exists() and not _is_alive(a_poster_pid):
                 Path(a_poster_pid).unlink(missing_ok=True)
                 _launch(POSTER_SCRIPT, os.path.join(apath, "poster.log"), a_poster_pid, extra_env=aenv)
@@ -208,7 +207,6 @@ _growth_session = None
 
 def _growth_loop():
     """Ambil snapshot follower sekali per jam (hanya simpan 1 entry per hari)."""
-    global _growth_session
     time.sleep(10)   # tunggu server siap
     while True:
         try:
@@ -245,7 +243,7 @@ def _get_stats():
     cfg = config_loader.load()
     s["app_mode"]        = cfg.get("app_mode", "normal")
     s["active_hours"]    = f"{cfg.get('active_start_hour',7):02d}:00–{cfg.get('active_end_hour',23):02d}:00"
-    s["watchdog_restart"]= _watchdog_restart_count
+    s["watchdog_restart"]= s.get("watchdog_restarts", 0)
     return s
 
 def _get_comments():
@@ -2518,6 +2516,66 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _apply_llm_env(self, data):
+        """
+        Terapkan QODER_BIN / QODER_MODEL / APP_MODE dari payload settings.
+
+        QODER_BIN dipakai llm_router sebagai argv[0] subprocess dan diwarisi ke
+        proses anak lewat _launch(), jadi nilainya wajib berupa binary nyata.
+        Tanpa validasi ini satu POST ke /api/settings setara remote code execution.
+
+        Mengembalikan None kalau aman, atau pesan penolakan.
+        """
+        if data.get("qoder_bin"):
+            ok, info = web_security.validate_executable(data["qoder_bin"])
+            if not ok:
+                return f"qoder_bin ditolak: {info}"
+            os.environ["QODER_BIN"] = info
+        if data.get("qoder_model"):
+            model = str(data["qoder_model"]).strip()
+            # Nilainya dipasang sebagai argv setelah "-m", jadi awalan "-" berarti
+            # menyuntikkan flag tambahan ke Qoder CLI.
+            if model.startswith("-"):
+                return "qoder_model tidak boleh diawali '-'"
+            os.environ["QODER_MODEL"] = model
+        if data.get("app_mode"):
+            os.environ["APP_MODE"] = str(data["app_mode"])
+        return None
+
+    def _client_token(self):
+        """
+        Ambil token dari Authorization: Bearer, header X-UI-Token, query ?token=,
+        atau cookie ui_token.
+
+        Cookie dan query param ikut didukung karena dashboard dipakai lewat browser:
+        EventSource (SSE log) dan navigasi biasa tidak bisa mengirim header custom.
+        """
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        header = self.headers.get("X-UI-Token", "")
+        if header:
+            return header.strip()
+        if parse_qs(urlparse(self.path).query).get("token"):
+            return parse_qs(urlparse(self.path).query)["token"][0].strip()
+        for part in (self.headers.get("Cookie", "") or "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == "ui_token":
+                return value
+        return None
+
+    def _authorized(self) -> bool:
+        client = self.client_address[0] if self.client_address else ""
+        return web_security.is_authorized(client, self._client_token())
+
+    def _deny(self):
+        self._json(401, {
+            "ok": False,
+            "msg": ("Akses ditolak. Dashboard hanya menerima klien loopback, kecuali "
+                    "UI_TOKEN di-set — lalu kirim header 'Authorization: Bearer <token>' "
+                    "atau buka dengan ?token=<token>."),
+        })
+
     def _body(self):
         # Payload rusak / Content-Length tidak valid tidak boleh menjatuhkan
         # koneksi — kembalikan {} supaya handler menjawab dengan JSON normal.
@@ -2533,6 +2591,10 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        if not self._authorized():
+            self._deny()
+            return
+
         path = urlparse(self.path).path
 
         if path == "/":
@@ -2540,6 +2602,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type","text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
+            # Simpan token sebagai cookie supaya navigasi berikutnya dan SSE log
+            # ikut terautentikasi tanpa harus menempel ?token= di setiap URL.
+            qs_token = parse_qs(urlparse(self.path).query).get("token")
+            if qs_token and self._authorized():
+                self.send_header(
+                    "Set-Cookie",
+                    f"ui_token={qs_token[0]}; Path=/; HttpOnly; SameSite=Strict",
+                )
             self.end_headers(); self.wfile.write(b)
 
         elif path == "/api/status":
@@ -2796,6 +2866,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authorized():
+            self._deny()
+            return
+
         path = urlparse(self.path).path
 
         # ── per-account endpoints ─────────────────────────────────────────────
@@ -2809,7 +2883,13 @@ class Handler(BaseHTTPRequestHandler):
             parts  = path.split("/")   # ['','api','accounts','name','proc','action']
             aname  = parts[3]
             action = "/".join(parts[4:]) if len(parts) > 4 else ""
-            apath  = os.path.join(_DIR, "accounts", aname)
+            # aname datang mentah dari URL. Tanpa validasi ini, "/api/accounts/../delete"
+            # membuat apath menunjuk root project sehingga _terminate di bawah mematikan
+            # bot asli dan delete_account() menjalankan shutil.rmtree() pada seluruh repo.
+            apath = account_manager.account_path(aname)
+            if apath is None:
+                self._json(400, {"ok": False, "msg": "Nama akun tidak valid"})
+                return
             aenv   = account_manager.get_account_env(aname)
 
             if action == "delete":
@@ -2931,9 +3011,13 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/settings":
             data = self._body()
-            if data.get("qoder_bin"):   os.environ["QODER_BIN"]   = data["qoder_bin"]
-            if data.get("qoder_model"): os.environ["QODER_MODEL"] = data["qoder_model"]
-            if data.get("app_mode"):    os.environ["APP_MODE"]    = data["app_mode"]
+            if not isinstance(data, dict):
+                self._json(400, {"ok": False, "msg": "payload harus berupa JSON object"})
+                return
+            reject = self._apply_llm_env(data)
+            if reject:
+                self._json(400, {"ok": False, "msg": reject})
+                return
             self._json(200, {"ok": config_loader.save(data)})
 
         elif path == "/api/settings/import":
@@ -2942,9 +3026,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(data, dict):
                     self._json(400, {"ok": False, "msg": "payload harus berupa JSON object"})
                 else:
-                    if data.get("qoder_bin"):   os.environ["QODER_BIN"]   = data["qoder_bin"]
-                    if data.get("qoder_model"): os.environ["QODER_MODEL"] = data["qoder_model"]
-                    if data.get("app_mode"):    os.environ["APP_MODE"]    = data["app_mode"]
+                    reject = self._apply_llm_env(data)
+                    if reject:
+                        self._json(400, {"ok": False, "msg": reject})
+                        return
                     self._json(200, {"ok": config_loader.save(data)})
             except Exception as exc:
                 self._json(400, {"ok": False, "msg": str(exc)})
@@ -3001,8 +3086,19 @@ if __name__ == "__main__":
         stats_tracker.init_system_start()
     except Exception:
         pass
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"ThreadScope Dashboard  →  http://localhost:{PORT}")
+    bind_host = web_security.resolve_bind_host()
+    requested = os.getenv("UI_HOST", "").strip()
+    if requested and requested != bind_host:
+        print(f"[SECURITY] UI_HOST={requested} diabaikan — dashboard tetap di {bind_host}. "
+              f"Untuk membuka ke jaringan, set UI_TOKEN dulu.")
+    server = ThreadingHTTPServer((bind_host, PORT), Handler)
+    if bind_host == "127.0.0.1":
+        print(f"ThreadScope Dashboard  →  http://localhost:{PORT}   (loopback saja)")
+        if os.getenv("UI_TOKEN", "").strip():
+            print("[SECURITY] UI_TOKEN aktif — kirim 'Authorization: Bearer <token>' atau buka ?token=<token>")
+    else:
+        print(f"ThreadScope Dashboard  →  http://{bind_host}:{PORT}   "
+              f"(TERBUKA ke jaringan — token WAJIB, jangan di WiFi publik)")
     print("Ctrl+C untuk berhenti.")
     try:
         server.serve_forever()

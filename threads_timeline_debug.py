@@ -29,8 +29,6 @@ def main():
         
         # --- FIX REFRESH TIMELINE (RECURSIVE CLEANER) ---
         import json
-        import random
-        import string
         import uuid
         
         vars_dict = json.loads(query_config['variables'])

@@ -128,7 +128,7 @@ def parse_ai_reply(reply: str) -> str:
     # Menghapus link-nya saja menyisakan kalimat menggantung ("cek aja di ...").
     # Pola kedua ikut menangkap domain tanpa protokol ("shope.ee/4vKx9") karena
     # Threads tetap merendernya sebagai link yang bisa diklik.
-    # TLD wajib huruf supaya angka kiểu Indonesia ("150.000") tidak ikut kena.
+    # TLD wajib huruf supaya angka gaya Indonesia ("150.000") tidak ikut kena.
     link_patterns = (
         r'https?://\S+',
         r'\b(?:[\w-]+\.)+[a-zA-Z]{2,}(?:/\S*)?\b',
@@ -665,7 +665,7 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
             if reply == "SKIP":
                 return "SKIP"
             if not _quality_check(reply):
-                print(f"  [QC] Masih gagal setelah regenerate — pakai hasil terakhir")
+                print("  [QC] Masih gagal setelah regenerate — pakai hasil terakhir")
 
         # ── self-critique gate — LLM nilai 3 dimensi (natural/jelas/sopan) ────
         min_score   = _cfg_int("quality_min_score", 6)
@@ -680,7 +680,7 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
             print(f"  [CRITIQUE] Skor di bawah {min_score} — generate ulang ({retries}/{max_retries})…")
             retry = _do_generate()
             if not retry or retry == "SKIP" or not _quality_check(retry):
-                print(f"  [CRITIQUE] Retry tidak menghasilkan kandidat valid — berhenti mencoba")
+                print("  [CRITIQUE] Retry tidak menghasilkan kandidat valid — berhenti mencoba")
                 break
             reply  = retry
             scores = _score_quality(reply, caption)
@@ -698,14 +698,14 @@ komentar lo sebelumnya — jangan ulangi pola/nada yang sama:
         # ── semantic dedup — cek similarity dengan 5 komentar terakhir ────────
         recent_replies = comment_memory.get_recent_replies(n=5)
         if any(_jaccard(reply, r) >= 0.5 for r in recent_replies if r):
-            print(f"  [DEDUP] Komentar terlalu mirip histori — generate ulang…")
+            print("  [DEDUP] Komentar terlalu mirip histori — generate ulang…")
             dedup_retry = _do_generate()
             if dedup_retry and dedup_retry != "SKIP" and _quality_check(dedup_retry):
                 if not any(_jaccard(dedup_retry, r) >= 0.5 for r in recent_replies if r):
                     reply = dedup_retry
-                    print(f"  [DEDUP] Pakai retry yang lebih unik")
+                    print("  [DEDUP] Pakai retry yang lebih unik")
                 else:
-                    print(f"  [DEDUP] Retry masih mirip — pakai versi awal")
+                    print("  [DEDUP] Retry masih mirip — pakai versi awal")
 
         print(f"[FINAL]: {reply} ({len(reply)} kar)\n")
 
@@ -833,8 +833,8 @@ def post_reply(session, post_id: str, text: str) -> Optional[str]:
             loc = resp.headers.get("location", "")
             if "accounts/login" in loc or "login" in loc:
                 raise SessionExpiredError(
-                    f"post_reply: session expired (redirect to login). "
-                    f"Perbarui THREADS_SESSION_ID di .env"
+                    "post_reply: session expired (redirect to login). "
+                    "Perbarui THREADS_SESSION_ID di .env"
                 )
             print(f"[REPLY_WARN] Redirect ke: {loc[:80]}")
             return None
@@ -1371,7 +1371,7 @@ def process_timeline(session):
                         config_loader.save({"bot_persona": new_p})
                         print(f"  [PERSONA] Persona diperbarui: {new_p[:80]}…")
                     else:
-                        print(f"  [PERSONA] Data belum cukup untuk refinement, skip.")
+                        print("  [PERSONA] Data belum cukup untuk refinement, skip.")
 
                 comments_cycle += 1
                 if comments_cycle >= max_per_cycle:

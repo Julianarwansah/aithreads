@@ -25,6 +25,23 @@ watcher_output.log
 poster_last_post.json
 poster_daily_count.json
 
+# === Artefak safe_store (lock antar-proses + file sementara saat atomic write) ===
+*.lock
+.tmp-*.json
+
+# === Runtime lain yang belum terdaftar ===
+web_ui.pid
+web_ui_output.log
+jh.pid
+job_hunter.log
+job_applications.json
+trending_cache.json
+linkedin_*.pid
+linkedin_session.json
+
+# === Test ===
+.pytest_cache/
+
 # === Python ===
 __pycache__/
 *.py[cod]

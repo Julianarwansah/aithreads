@@ -281,7 +281,6 @@ def _build_trend_summary(posts: list[dict]) -> str:
 
 # ── generator ─────────────────────────────────────────────────────────────────
 def generate_thread_content(session) -> str:
-    global _post_history
     cfg    = config_loader.load()
     topics = cfg.get("poster_topics") or DEFAULT_TOPICS
 
@@ -368,7 +367,7 @@ tema yang relevan sekarang: {topic_hint}"""
             score = _score_naturalness(content, topic_hint)
             print(f"  [POSTER CRITIQUE] Skor naturalness: {score}/10")
             if score < 7:
-                print(f"  [POSTER CRITIQUE] Skor rendah — generate ulang…")
+                print("  [POSTER CRITIQUE] Skor rendah — generate ulang…")
                 retry = _gen_best_post()
                 if retry:
                     retry_score = _score_naturalness(retry, topic_hint)
@@ -579,15 +578,15 @@ def is_post_window(now: datetime | None = None) -> tuple[bool, str]:
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     if not llm_router.is_available():
-        print(f"[ERROR] Qoder CLI tidak ditemukan.")
+        print("[ERROR] Qoder CLI tidak ditemukan.")
         sys.exit(1)
-    print(f"[INFO] Poster aktif — backend: Qoder CLI")
+    print("[INFO] Poster aktif — backend: Qoder CLI")
     print("[INFO] Mengecek koneksi Qoder CLI…")
     if not llm_router.ping():
         print("[ERROR] Qoder CLI tidak merespons saat startup. Cek login & koneksi internet.")
         sys.exit(1)
     print("[INFO] Qoder CLI OK.")
-    print(f"[INFO] Alur: scan tren → generate post natural → kirim")
+    print("[INFO] Alur: scan tren → generate post natural → kirim")
 
     cfg0    = config_loader.load()
     hours0  = _cfg_number(cfg0, "poster_interval_hours", 48)

@@ -27,7 +27,7 @@ import stats_tracker
 import llm_router
 import config_loader
 import comment_memory
-from services.linkedin_session_manager import LinkedInAuth, SessionStatus
+from services.linkedin_session_manager import LinkedInAuth
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -238,9 +238,8 @@ def _parse_activity(activity: Dict, urn: str, lookup: Dict) -> Optional[Dict]:
     likes    = counts.get("numLikes", 0) or 0
     comments = counts.get("numComments", 0) or 0
 
-    # Age check
-    created_at = activity.get("actor", {}).get("subDescription", {})
-    # Voyager encodes time as relative string, skip age filter for now
+    # Filter umur dilewati: Voyager mengkodekan waktu sebagai string relatif
+    # (mis. "2 hours ago"), bukan timestamp yang bisa dibandingkan.
 
     return {
         "urn":      urn,
@@ -377,7 +376,7 @@ Komentar lo sebelumnya (jangan ulangi pola):
         if reply == "SKIP":
             return "SKIP"
         if not _quality_check(reply):
-            logger.info(f"  [LI_QC] Gagal — regenerate…")
+            logger.info("  [LI_QC] Gagal — regenerate…")
             reply = _do_gen()
             if reply == "SKIP":
                 return "SKIP"

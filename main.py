@@ -11,13 +11,11 @@ This eliminates the login loop problem caused by trust-layer rejection.
 """
 
 import logging
-import os
 import sys
 
 from dotenv import load_dotenv
 
-from services.session_manager import SessionManager, ThreadsAuth, SessionStatus
-from services.feed_explorer import FeedExplorer
+from services.session_manager import SessionManager, SessionStatus
 from services.network_discovery import NetworkDiscovery
 
 # Load environment variables
@@ -70,7 +68,7 @@ def initialize_session() -> tuple[bool, SessionManager | None]:
     result = session_manager.validate_session()
     
     if result.status == SessionStatus.VALID:
-        logger.info(f"[SESSION] VALID")
+        logger.info("[SESSION] VALID")
         logger.info(f"  Status: {result.status.value}")
         logger.info(f"  User ID: {result.user_id or 'N/A'}")
         return True, session_manager

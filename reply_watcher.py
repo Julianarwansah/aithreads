@@ -546,11 +546,11 @@ def check_and_reply(session, our_username: str):
             except SessionExpiredError as e:
                 print(f"\n{'='*60}")
                 print(f"  [WATCHER] SESSION EXPIRED: {e}")
-                print(f"  [WATCHER] Posting dihentikan. Perbarui cookies di .env:")
-                print(f"  [WATCHER]   1. Buka threads.com di browser")
-                print(f"  [WATCHER]   2. F12 → Application → Cookies → threads.com")
-                print(f"  [WATCHER]   3. Salin sessionid ke THREADS_SESSION_ID di .env")
-                print(f"  [WATCHER]   4. Restart watcher")
+                print("  [WATCHER] Posting dihentikan. Perbarui cookies di .env:")
+                print("  [WATCHER]   1. Buka threads.com di browser")
+                print("  [WATCHER]   2. F12 → Application → Cookies → threads.com")
+                print("  [WATCHER]   3. Salin sessionid ke THREADS_SESSION_ID di .env")
+                print("  [WATCHER]   4. Restart watcher")
                 print(f"{'='*60}\n")
                 raise  # bubble up ke main() agar loop berhenti
             except RateLimitError as e:

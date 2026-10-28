@@ -3,9 +3,10 @@ config_loader.py -- Baca/tulis ui_settings.json.
 
 Default dipakai kalau file belum ada atau key-nya hilang.
 """
-import json
 import os
 import threading
+
+import safe_store
 
 _DIR          = os.path.dirname(os.path.abspath(__file__))
 # Jika dijalankan sebagai sub-proses akun, gunakan folder profil akun tersebut
@@ -82,25 +83,21 @@ DEFAULTS = {
 
 def load() -> dict:
     with _lock:
-        if not os.path.exists(SETTINGS_FILE):
-            return DEFAULTS.copy()
-        try:
-            with open(SETTINGS_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            merged = DEFAULTS.copy()
+        data = safe_store.read_json(SETTINGS_FILE, {})
+        merged = DEFAULTS.copy()
+        if isinstance(data, dict):
             merged.update(data)
-            return merged
-        except Exception:
-            return DEFAULTS.copy()
+        return merged
 
 
 def save(partial: dict) -> bool:
-    with _lock:
+    # file_lock antar-proses + tulis atomik: tanpa ini, bot yang sedang membaca
+    # config bisa melihat file setengah tertulis dan diam-diam jatuh ke DEFAULTS.
+    with _lock, safe_store.file_lock(SETTINGS_FILE):
         current = load()
         current.update(partial)
         try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(current, f, indent=2, ensure_ascii=False)
+            safe_store.write_json(SETTINGS_FILE, current)
             return True
         except Exception:
             return False
