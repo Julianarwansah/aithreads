@@ -112,6 +112,17 @@ def _strip_markdown_structure(text: str) -> str:
     maka ambil baris setelah "**Komentar:**" atau semua baris "> ...".
     Kalau tidak ada penanda itu, kembalikan teks apa adanya.
     """
+    # Kepala versi dari prompt "2 versi komentar" ("**Versi 2** — react, ...")
+    # adalah scaffolding internal, bukan isi komentar. Baris ini pernah bocor
+    # ke Threads dan membuat komentar terlihat amatir, jadi buang dulu sebelum
+    # pembersihan markdown lainnya berjalan.
+    lines = text.splitlines()
+    if lines and re.match(r'^\s*\*{0,2}\s*versi\s*\d+\s*\*{0,2}\b', lines[0], re.IGNORECASE):
+        lines = lines[1:]
+        if not lines:
+            return ""
+        text = "\n".join(lines)
+
     # Cek apakah ada blok "**Komentar:**"
     komentar_marker = re.search(r'\*\*[Kk]omentar[:\s]*\*\*', text)
     if komentar_marker:
@@ -169,7 +180,8 @@ def parse_ai_reply(reply: str) -> str:
 _AI_SOUNDING_PATTERNS = re.compile(
     r'^(wah[,!\s]|haha[,!\s]|hehe[,!\s]?|oh wow|relate banget|keren banget|semangat|'
     r'pasti bisa|luar biasa|sangat\s|betul sekali|memang benar|tentu saja|'
-    r'tentu aja|pastinya|yep[,!\s]|yap[,!\s]|iya banget|benar banget)',
+    r'tentu aja|pastinya|yep[,!\s]|yap[,!\s]|iya banget|benar banget|'
+    r'serius\?|ga nyangka|nggak nyangka|gak nyangka|anjir\b|kaget\b|gila\b|buset\b|wow\b)',
     re.IGNORECASE,
 )
 _AI_FILLER_PHRASES = re.compile(
@@ -611,8 +623,8 @@ TIPE KOMENTAR (pilih yang paling pas, bukan selalu kasih saran):
 
 2. REACT / NGOBROL — lo cuma relate, ga perlu kasih apa-apa
    contoh: "ini gue banget kemarin"
-   contoh: "serius? gue kira cuma gue doang"
-   contoh: "anjir sama persis"
+   contoh: "sama, dulu gue juga mikirnya gitu"
+   contoh: "persis kayak setup gue sebelum gue rapiin"
 
 3. SHARE SINGKAT — lo pernah ngalamin, share dikit aja
    contoh: "gue kemarin 3 hari stuck di sini"
@@ -625,14 +637,21 @@ POLA NULIS:
 - 1 kalimat pendek, kadang 4–6 kata cukup
 - bahasa santai: "gue", "lo", "sih", "aja", "emg", "blm", "udh", "tp", "jg", "yg"
 - boleh typo kecil biar keliatan manusia beneran
-- JANGAN mulai dengan "Wah", "Haha", "Hehe", "Oh", "Ya", "Iya", "Relate banget"
+- JANGAN mulai dengan "Wah", "Haha", "Hehe", "Oh", "Ya", "Iya", "Relate banget",
+  "Serius?", "Ga nyangka", "Nggak nyangka", "Anjir", "Kaget", "Gila", "Buset", "Wow"
+- Komentar harus ADA ISINYA: pengalaman spesifik, detail teknis, atau pertanyaan
+  yang nunjukkin lo paham topiknya. Reaksi kaget doang tanpa isi = jelek.
+- Nada: rekan seprofesi yang tenang. Bukan penggemar, bukan pemula yang takjub.
+  Maks satu tanda seru, tanpa emoji berlebihan.
 - JANGAN kasih saran kalau ga diminta
 - DILARANG: link, nama produk spesifik, promosi
 - kalau postingan duka/politik panas/NSFW: balas SKIP
 
-CONTOH JELEK (keliatan AI):
+CONTOH JELEK (keliatan AI atau allay):
 "Relate banget nih! Emang susah sih, coba mulai dari yang simpel dulu biar ga overwhelming."
-"Wah keren banget progress lo! Semangat terus ya, pasti bisa!"{sentiment_line}
+"Wah keren banget progress lo! Semangat terus ya, pasti bisa!"
+"Serius? gue kira hasilnya bakal mirip2 aja"
+"Anjir keren banget wkwk"{sentiment_line}
 
 {others_block}
 

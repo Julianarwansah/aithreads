@@ -83,14 +83,16 @@ def test_save_bersamaan_tidak_kehilangan_key(isolated_data_dir):
 
 def test_pembaca_tidak_pernah_melihat_config_ter_reset(isolated_data_dir):
     """Selama ada yang menulis, pembaca tidak boleh melihat persona kembali ke default."""
-    import config_loader
-
     ctx = mp.get_context("spawn")
     cfg_path = os.path.join(isolated_data_dir, "config.json")
 
-    # Tanam persona non-default sebagai penanda.
-    os.environ["PROFILE_DIR"] = isolated_data_dir
-    config_loader.save({"bot_persona": "persona-khusus-milik-user"})
+    # Tanam persona non-default sebagai penanda. Ditulis langsung ke file, BUKAN
+    # lewat config_loader.save() di proses induk: SETTINGS_FILE adalah konstanta
+    # modul yang dihitung sekali saat impor, jadi kalau test lain sudah lebih
+    # dulu mengimpor config_loader dengan PROFILE_DIR berbeda, save() di sini
+    # akan menulis ke direktori yang salah dan penandanya tidak pernah ada.
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump({"bot_persona": "persona-khusus-milik-user"}, f)
 
     out_file = os.path.join(isolated_data_dir, "reader.json")
     reader = ctx.Process(target=_config_reader, args=(isolated_data_dir, out_file, 3000))
