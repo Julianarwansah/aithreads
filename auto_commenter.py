@@ -24,6 +24,7 @@ import llm_router
 import config_loader
 import comment_memory
 import daily_quota
+import persona_history
 from services.session_manager import SessionManager, SessionStatus
 
 
@@ -61,6 +62,7 @@ _rate_backoff = _RateBackoff()
 _DIR       = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR  = os.getenv("PROFILE_DIR", _DIR)
 QUOTA_FILE = os.path.join(_DATA_DIR, "bot_daily_count.json")
+PERSONA_HISTORY_FILE = os.path.join(_DATA_DIR, "persona_history.json")
 # Interval cek ulang saat plafon sudah tercapai. Mengikuti pola poster, dan cukup
 # sering supaya kuota yang Anda naikkan dari dashboard berlaku tanpa restart bot.
 _QUOTA_RECHECK_SECONDS = 1800
@@ -1398,6 +1400,10 @@ def process_timeline(session):
                     new_p = refine_persona()
                     if new_p:
                         config_loader.save({"bot_persona": new_p})
+                        persona_history.record(
+                            PERSONA_HISTORY_FILE, new_p, "auto-refine",
+                            comments_sent=total_sent,
+                        )
                         print(f"  [PERSONA] Persona diperbarui: {new_p[:80]}…")
                     else:
                         print("  [PERSONA] Data belum cukup untuk refinement, skip.")

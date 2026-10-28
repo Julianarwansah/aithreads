@@ -25,6 +25,7 @@ watcher_output.log
 poster_last_post.json
 poster_daily_count.json
 bot_daily_count.json
+persona_history.json
 
 # === Artefak safe_store (lock antar-proses + file sementara saat atomic write) ===
 *.lock

@@ -15,6 +15,7 @@ import config_loader
 import growth_tracker
 import account_manager
 import daily_quota
+import persona_history
 import web_security
 
 _DIR           = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +28,7 @@ WATCHER_LOG    = os.path.join(_DIR, "watcher_output.log")
 BOT_PID        = os.path.join(_DIR, "bot.pid")
 POSTER_PID     = os.path.join(_DIR, "poster.pid")
 WATCHER_PID    = os.path.join(_DIR, "watcher.pid")
+PERSONA_HISTORY_FILE = os.path.join(_DIR, "persona_history.json")
 
 JH_SCRIPT = os.path.join(_DIR, "job_hunter.py")
 JH_LOG    = os.path.join(_DIR, "job_hunter.log")
@@ -235,6 +237,26 @@ def _init_growth_session():
 threading.Thread(target=lambda: (_init_growth_session(), _growth_loop()), daemon=True).start()
 
 # ── data helpers ─────────────────────────────────────────────────────────────
+def _record_persona_change(data: dict):
+    """Catat perubahan persona manual ke riwayat, supaya jejaknya tidak putus.
+
+    Dipanggil sebelum config disimpan: nilai lama masih terbaca di sini untuk
+    dibandingkan. Tanpa ini, suntingan dari dashboard menimpa persona tanpa
+    meninggalkan versi yang bisa dipulihkan.
+    """
+    if "bot_persona" not in data:
+        return
+    baru = (data.get("bot_persona") or "").strip()
+    lama = (config_loader.get("bot_persona") or "").strip()
+    if baru == lama:
+        return
+    import stats_tracker
+    persona_history.record(
+        PERSONA_HISTORY_FILE, baru, "manual",
+        comments_sent=stats_tracker.get_stats().get("comments_sent"),
+    )
+
+
 def _get_stats():
     sp = os.path.join(_DIR, "stats.json")
     try:
@@ -252,6 +274,19 @@ def _get_stats():
     s["bot_quota_limit"]     = quota
     s["bot_quota_used"]      = used
     s["bot_quota_remaining"] = daily_quota.remaining(quota, used)
+    # Data engagement sudah dihitung comment_memory tiap siklus tetapi tidak
+    # pernah ditampilkan; ini membuatnya terlihat tanpa menghitung ulang.
+    try:
+        import comment_memory
+        eng  = comment_memory.get_engagement_stats()
+        bs   = eng.get("best_style", "") or ""
+        bsnt = eng.get("best_sentiment", "") or ""
+        s["eng_best_style"]          = bs
+        s["eng_best_style_rate"]     = (eng.get("by_style") or {}).get(bs, {}).get("rate")
+        s["eng_best_sentiment"]      = bsnt
+        s["eng_best_sentiment_rate"] = (eng.get("by_sentiment") or {}).get(bsnt, {}).get("rate")
+    except Exception:
+        pass
     return s
 
 def _get_comments():
@@ -854,6 +889,12 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="row"><span class="k">Kuota Komentar Hari Ini</span><span class="v" id="d-quota">—</span></div>
       <div class="row"><span class="k">Komentar Berikutnya</span><span class="v" id="d-next" style="color:var(--teal)">—</span></div>
       <div class="row"><span class="k">Watchdog Restart</span><span class="v" id="d-wdr">0×</span></div>
+      <div class="row"><span class="k">Gaya Paling Dibalas</span><span class="v" id="d-engstyle">—</span></div>
+      <div class="row"><span class="k">Tipe Post Paling Produktif</span><span class="v" id="d-engsent">—</span></div>
+      <div style="margin-top:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Isi Komentar Terakhir</div>
+        <div id="d-lctxt" style="font-size:12px;line-height:1.5;white-space:pre-wrap;border:1px solid var(--brd2);border-radius:8px;padding:8px 10px">—</div>
+      </div>
     </div>
   </div>
 
@@ -953,6 +994,7 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
 <div class="set-layout">
   <div class="set-nav">
     <div class="snav on"  onclick="goSet('bot')"     id="sn-bot">Bot &amp; Mode</div>
+    <div class="snav"     onclick="goSet('persona-h')" id="sn-persona-h">Riwayat Persona</div>
     <div class="snav"     onclick="goSet('sched')"   id="sn-sched">Jadwal Aktif</div>
     <div class="snav"     onclick="goSet('timing')"  id="sn-timing">Timing</div>
     <div class="snav"     onclick="goSet('llm')"     id="sn-llm">LLM (Qoder)</div>
@@ -985,6 +1027,13 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
         <div class="hint">Karakter yang dipakai AI saat menulis komentar. Deskripsikan background, gaya bahasa, dan sudut pandang bot.</div>
       </div>
       <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm1"></span></div>
+    </div>
+
+    <!-- Riwayat Persona -->
+    <div class="ss" id="ss-persona-h">
+      <div class="sec-title">Riwayat Persona</div>
+      <div class="sec-desc">Setiap perubahan persona tercatat: auto-refine tiap 15 komentar, suntingan manual, dan rollback. Pulihkan versi mana pun kalau karakter bot terasa melenceng — persona yang tertimpa tidak hilang lagi.</div>
+      <div id="ph-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
     <!-- Jadwal -->
@@ -1540,6 +1589,44 @@ function goSet(id){
   document.querySelectorAll('.snav').forEach(s=>s.classList.remove('on'));
   document.getElementById('ss-'+id).classList.add('on');
   document.getElementById('sn-'+id).classList.add('on');
+  if(id==='persona-h')loadPersonaHistory();
+}
+
+// Persona adalah teks bebas (keluaran LLM maupun suntingan user) yang dirender
+// ke innerHTML, jadi wajib di-escape — bukan hanya '<' seperti pola lama.
+function escHtml(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+async function loadPersonaHistory(){
+  const box=document.getElementById('ph-list');
+  try{
+    const d=await(await fetch('/api/persona/history')).json();
+    const h=d.history||[];
+    if(!h.length){
+      box.innerHTML='<div class="hint">Belum ada perubahan persona tercatat. Entri pertama muncul saat auto-refine jalan (tiap 15 komentar berhasil) atau saat Anda menyimpan persona baru dari tab Bot &amp; Mode.</div>';
+      return;
+    }
+    box.innerHTML=h.slice().reverse().map((e,ri)=>{
+      const i=h.length-1-ri;
+      const meta=`${escHtml(e.ts||'—')} · <b style="color:var(--teal)">${escHtml(e.source||'?')}</b>`+
+                 (e.comments_sent!=null&&e.comments_sent!==''?` · ${escHtml(e.comments_sent)} komentar`:'');
+      return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+          <span style="font-size:12px;color:var(--muted)">${meta}</span>
+          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="rollbackPersona(${i})">Pulihkan</button>
+        </div>
+        <div style="font-size:12px;margin-top:6px;white-space:pre-wrap;line-height:1.5">${escHtml(e.persona||'')}</div>
+      </div>`;
+    }).join('');
+  }catch(err){
+    box.innerHTML='<div class="hint">Gagal memuat riwayat persona.</div>';
+  }
+}
+
+async function rollbackPersona(i){
+  if(!confirm('Pulihkan persona dari entri riwayat ini? Persona yang sekarang ikut tercatat sebagai entri baru, jadi tetap bisa dikembalikan lagi.'))return;
+  const d=await(await fetch('/api/persona/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})})).json();
+  toast(d.ok?'Persona dipulihkan!':'Gagal: '+d.msg,d.ok?'ok':'err');
+  if(d.ok){loadSettings();loadPersonaHistory();}
 }
 
 // ── bot controls ──────────────────────────────────────────────────────────
@@ -1649,6 +1736,12 @@ async function pollStatus(){
     const nextEl=document.getElementById('d-next');
     if(nextEl)nextEl.textContent=d.est_next||(rb?'menghitung…':'—');
     document.getElementById('d-wdr').textContent=(s.watchdog_restart||0)+'×';
+    const es=document.getElementById('d-engstyle');
+    if(es)es.textContent=s.eng_best_style?`${s.eng_best_style} (${Math.round((s.eng_best_style_rate||0)*100)}%)`:'—';
+    const esn=document.getElementById('d-engsent');
+    if(esn)esn.textContent=s.eng_best_sentiment?`${s.eng_best_sentiment} (${Math.round((s.eng_best_sentiment_rate||0)*100)}%)`:'—';
+    const lt=document.getElementById('d-lctxt');
+    if(lt)lt.textContent=s.last_comment_text||'—';
 
     // filter info
     document.getElementById('d-age').textContent=(fi.max_age||5)+' jam';
@@ -2706,6 +2799,12 @@ class Handler(BaseHTTPRequestHandler):
                 },
             })
 
+        elif path == "/api/persona/history":
+            self._json(200, {
+                "history": persona_history.read(PERSONA_HISTORY_FILE),
+                "current": config_loader.get("bot_persona") or "",
+            })
+
         elif path == "/api/settings":
             self._json(200, config_loader.load())
 
@@ -3045,6 +3144,7 @@ class Handler(BaseHTTPRequestHandler):
             if reject:
                 self._json(400, {"ok": False, "msg": reject})
                 return
+            _record_persona_change(data)
             self._json(200, {"ok": config_loader.save(data)})
 
         elif path == "/api/settings/import":
@@ -3057,9 +3157,29 @@ class Handler(BaseHTTPRequestHandler):
                     if reject:
                         self._json(400, {"ok": False, "msg": reject})
                         return
+                    _record_persona_change(data)
                     self._json(200, {"ok": config_loader.save(data)})
             except Exception as exc:
                 self._json(400, {"ok": False, "msg": str(exc)})
+
+        elif path == "/api/persona/rollback":
+            data = self._body()
+            idx = data.get("index") if isinstance(data, dict) else None
+            riwayat = persona_history.read(PERSONA_HISTORY_FILE)
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(riwayat)):
+                self._json(400, {"ok": False, "msg": "index riwayat tidak valid"})
+                return
+            persona = (riwayat[idx].get("persona") or "").strip()
+            if not persona:
+                self._json(400, {"ok": False, "msg": "entri riwayat tidak punya persona"})
+                return
+            config_loader.save({"bot_persona": persona})
+            import stats_tracker
+            persona_history.record(
+                PERSONA_HISTORY_FILE, persona, "rollback",
+                comments_sent=stats_tracker.get_stats().get("comments_sent"),
+            )
+            self._json(200, {"ok": True, "persona": persona})
 
         elif path == "/api/blacklist/add":
             data = self._body()
