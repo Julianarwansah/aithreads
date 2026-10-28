@@ -23,6 +23,7 @@ import agent_loader
 import llm_router
 import config_loader
 import comment_memory
+import daily_quota
 from services.session_manager import SessionManager, SessionStatus
 
 
@@ -53,6 +54,16 @@ class _RateBackoff:
 
 
 _rate_backoff = _RateBackoff()
+
+# Plafon komentar proaktif per hari kalender. Balasan (reply_watcher) tidak ikut
+# dihitung: membiarkan orang menggantung lebih berisiko daripada berkomentar baru.
+# PROFILE_DIR membuat plafon ini berlaku per-akun, bukan global.
+_DIR       = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR  = os.getenv("PROFILE_DIR", _DIR)
+QUOTA_FILE = os.path.join(_DATA_DIR, "bot_daily_count.json")
+# Interval cek ulang saat plafon sudah tercapai. Mengikuti pola poster, dan cukup
+# sering supaya kuota yang Anda naikkan dari dashboard berlaku tanpa restart bot.
+_QUOTA_RECHECK_SECONDS = 1800
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -1187,6 +1198,22 @@ def calculate_trend_score(likes: int, replies: int) -> int:
     return like_score + reply_score
 
 def process_timeline(session):
+    # Cek plafon harian SEBELUM menyentuh API: kalau sudah habis, jangan fetch
+    # token maupun timeline sama sekali.
+    cfg0  = config_loader.load()
+    quota = cfg0.get("bot_daily_quota", 40)
+    used  = daily_quota.read(QUOTA_FILE)
+    if daily_quota.is_exhausted(quota, used):
+        print(f"[KUOTA] Plafon harian tercapai ({used}/{int(quota)} komentar) — "
+              f"istirahat sampai tengah malam, cek lagi {_QUOTA_RECHECK_SECONDS // 60} menit…")
+        time.sleep(_QUOTA_RECHECK_SECONDS)
+        # True, bukan False: ini berhenti sengaja, bukan kegagalan. Return False
+        # akan menaikkan fail_streak di main loop dan memicu re-auth yang tak perlu.
+        return True
+    sisa = daily_quota.remaining(quota, used)
+    if sisa is not None:
+        print(f"[KUOTA] {used}/{int(quota)} komentar hari ini — sisa {sisa}")
+
     query_config = load_latest_query_config()
     tokens = get_fresh_tokens(session)
     print(f"[DEBUG] process_timeline: tokens fetched -> lsd={bool(tokens.get('lsd'))}, fb_dtsg={bool(tokens.get('fb_dtsg'))}")
@@ -1356,11 +1383,13 @@ def process_timeline(session):
             if our_comment_id is not None:
                 print(f"  >> Status Pengiriman: Berhasil! (comment_id={our_comment_id})")
                 stats_tracker.increment("comments_sent")
+                stats_tracker.log_comment(reply_text)
                 reply_cache.save_to_cache(
                     caption, reply_text,
                     post_id=str(post_id),
                     comment_id=our_comment_id,
                 )
+                used = daily_quota.increment(QUOTA_FILE)
 
                 # Auto-refine persona setiap 15 komentar berhasil
                 total_sent = stats_tracker.get_stats().get("comments_sent", 0)
@@ -1374,11 +1403,15 @@ def process_timeline(session):
                         print("  [PERSONA] Data belum cukup untuk refinement, skip.")
 
                 comments_cycle += 1
+                if daily_quota.is_exhausted(quota, used):
+                    print(f"[KUOTA] Plafon harian tercapai ({used}/{int(quota)} komentar) — "
+                          "berhenti sampai tengah malam.")
+                    break
                 if comments_cycle >= max_per_cycle:
                     human_delay()
                     break
-                print(f"  [PEAK] {comments_cycle}/{max_per_cycle} — jeda singkat lalu lanjut…")
-                time.sleep(random.randint(90, 180))
+                print(f"  [PEAK] {comments_cycle}/{max_per_cycle} — jeda mengikuti delay config…")
+                human_delay()
             else:
                 print("  >> Status Pengiriman: Gagal, coba post berikutnya…")
                 stats_tracker.increment("comment_failures")

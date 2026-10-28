@@ -14,6 +14,7 @@ load_dotenv()
 import config_loader
 import growth_tracker
 import account_manager
+import daily_quota
 import web_security
 
 _DIR           = os.path.dirname(os.path.abspath(__file__))
@@ -244,6 +245,13 @@ def _get_stats():
     s["app_mode"]        = cfg.get("app_mode", "normal")
     s["active_hours"]    = f"{cfg.get('active_start_hour',7):02d}:00–{cfg.get('active_end_hour',23):02d}:00"
     s["watchdog_restart"]= s.get("watchdog_restarts", 0)
+    # Plafon komentar proaktif hari ini. Balasan tidak dihitung, jadi angka ini
+    # memang lebih kecil dari comments_sent yang mencampur keduanya.
+    quota = cfg.get("bot_daily_quota", 40)
+    used  = daily_quota.read(os.path.join(_DIR, "bot_daily_count.json"))
+    s["bot_quota_limit"]     = quota
+    s["bot_quota_used"]      = used
+    s["bot_quota_remaining"] = daily_quota.remaining(quota, used)
     return s
 
 def _get_comments():
@@ -843,6 +851,7 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
       <div class="row"><span class="k">Jam Aktif</span><span class="v" id="d-sched">—</span></div>
       <div class="row"><span class="k">Watchdog</span><span class="v" id="d-wd">—</span></div>
       <div class="row"><span class="k">Komentar Terakhir</span><span class="v" id="d-lcmt">—</span></div>
+      <div class="row"><span class="k">Kuota Komentar Hari Ini</span><span class="v" id="d-quota">—</span></div>
       <div class="row"><span class="k">Komentar Berikutnya</span><span class="v" id="d-next" style="color:var(--teal)">—</span></div>
       <div class="row"><span class="k">Watchdog Restart</span><span class="v" id="d-wdr">0×</span></div>
     </div>
@@ -1011,6 +1020,11 @@ input[type=range].fi{padding:4px 0;cursor:pointer;accent-color:var(--purple)}
         </div>
       </div>
       <div class="hint" style="margin-bottom:14px">⚠ Di bawah 10 menit berisiko rate-limit dari Meta.</div>
+      <div class="fg">
+        <label>Plafon Komentar per Hari <span class="rv" id="rv-bquota">40</span> komentar</label>
+        <input type="range" class="fi" id="s-bquota" min="0" max="100" value="40" oninput="rv('rv-bquota',this.value)">
+        <div class="hint">Pengaman runaway — kalau tercapai, bot berhenti komentar sampai tengah malam lalu lanjut otomatis, dan tidak menyentuh API sama sekali selama menunggu. <b>Hanya menghitung komentar proaktif</b>: balasan ke orang yang membalas Anda tidak dibatasi. Dihitung ulang tiap tengah malam, per akun. <b>0 = tanpa batas.</b></div>
+      </div>
       <div class="save-bar"><button class="btn btn-blue" onclick="saveAll()">Simpan</button><span class="save-ok" id="sm3"></span></div>
     </div>
 
@@ -1621,6 +1635,17 @@ async function pollStatus(){
     document.getElementById('d-sched').textContent=`${String(sh).padStart(2,'0')}:00–${String(eh).padStart(2,'0')}:00 ${inHours?'✓ Aktif':'(di luar jam)'}`;
     document.getElementById('d-wd').textContent=wdOn?'Aktif — auto-restart ON':'Nonaktif';
     document.getElementById('d-lcmt').textContent=s.last_comment_time||'—';
+    const qEl=document.getElementById('d-quota');
+    if(qEl){
+      const rem=s.bot_quota_remaining;
+      if(rem===null||rem===undefined){
+        qEl.textContent='tanpa batas'; qEl.style.color='';
+      }else{
+        qEl.textContent=rem>0?`${rem} sisa (${s.bot_quota_used}/${s.bot_quota_limit})`
+                             :`habis (${s.bot_quota_used}/${s.bot_quota_limit})`;
+        qEl.style.color=rem>0?'':'var(--red)';
+      }
+    }
     const nextEl=document.getElementById('d-next');
     if(nextEl)nextEl.textContent=d.est_next||(rb?'menghitung…':'—');
     document.getElementById('d-wdr').textContent=(s.watchdog_restart||0)+'×';
@@ -1794,6 +1819,7 @@ async function loadSettings(){
     setSlider('s-dmax','rv-dmax',s.delay_max_minutes,17);
     setSlider('s-tok','rv-tok',s.max_tokens,120);
     setSlider('s-mlen','rv-mlen',s.max_comment_length,350);
+    setSlider('s-bquota','rv-bquota',s.bot_daily_quota,40);
     document.getElementById('s-qbin').value=s.qoder_bin||'';
     document.getElementById('s-qmdl').value=s.qoder_model||'';
     setSlider('s-pint','rv-pint',s.poster_interval_hours,48);
@@ -1852,6 +1878,7 @@ async function saveAll(){
     delay_max_minutes:     +document.getElementById('s-dmax').value,
     max_tokens:            +document.getElementById('s-tok').value,
     max_comment_length:    +document.getElementById('s-mlen').value,
+    bot_daily_quota:       +document.getElementById('s-bquota').value,
     qoder_bin:             document.getElementById('s-qbin').value.trim(),
     qoder_model:           document.getElementById('s-qmdl').value.trim(),
     poster_interval_hours: +document.getElementById('s-pint').value,

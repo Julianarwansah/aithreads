@@ -27,6 +27,8 @@ DEFAULTS = {
     "delay_max_minutes":    17,
     "max_tokens":           120,
     "max_comment_length":   350,
+    "bot_daily_quota":      40,         # plafon komentar proaktif per hari kalender;
+                                        # 0 = tanpa batas. Balasan (reply_watcher) tidak dihitung.
 
     # jadwal aktif (jam lokal)
     "active_start_hour":    7,          # mulai jam 07:00
