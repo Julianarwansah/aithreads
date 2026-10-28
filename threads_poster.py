@@ -320,6 +320,11 @@ def main():
         print(f"[ERROR] Qoder CLI tidak ditemukan.")
         sys.exit(1)
     print(f"[INFO] Poster aktif — backend: Qoder CLI")
+    print("[INFO] Mengecek koneksi Qoder CLI…")
+    if not llm_router.ping():
+        print("[ERROR] Qoder CLI tidak merespons saat startup. Cek login & koneksi internet.")
+        sys.exit(1)
+    print("[INFO] Qoder CLI OK.")
     print(f"[INFO] Alur: scan tren → generate post natural → kirim")
 
     sm = SessionManager()

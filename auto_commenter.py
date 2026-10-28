@@ -1303,6 +1303,11 @@ def main():
         print("        Pastikan sudah install & login Qoder, atau set QODER_BIN di .env")
         sys.exit(1)
     print(f"[INFO] Backend LLM: Qoder CLI ({llm_router.QODER_BIN})")
+    print("[INFO] Mengecek koneksi Qoder CLI…")
+    if not llm_router.ping():
+        print("[ERROR] Qoder CLI tidak merespons saat startup. Cek login & koneksi internet.")
+        sys.exit(1)
+    print("[INFO] Qoder CLI OK.")
 
     sm = SessionManager()
     if not sm.load_session() or sm.validate_session().status != SessionStatus.VALID:

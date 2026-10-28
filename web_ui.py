@@ -52,7 +52,19 @@ def _read_pid(pidfile):
         return None
 
 def _is_alive(pidfile):
-    return _read_pid(pidfile) is not None
+    pid = _read_pid(pidfile)
+    if pid is None:
+        return False
+    # os.kill(pid, 0) tetap sukses untuk zombie, jadi reap anak sendiri dulu
+    # supaya bot yang sudah mati tidak terbaca "Running" dan menolak restart.
+    try:
+        rpid, _ = os.waitpid(pid, os.WNOHANG)
+        if rpid == pid:
+            Path(pidfile).unlink(missing_ok=True)
+            return False
+    except ChildProcessError:
+        pass
+    return True
 
 def _launch(script, logfile, pidfile, extra_env=None):
     if _is_alive(pidfile):

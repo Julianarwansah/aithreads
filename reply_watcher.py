@@ -129,82 +129,74 @@ def _parse_relay_replies(html: str, comment_id: str, our_username: str) -> list:
     Parse relay store JSON dari halaman thread untuk menemukan balasan
     ke komentar kita (comment_id).
 
-    Mencari post node yang memenuhi salah satu kondisi:
-      - reply_to_author.username == our_username  (Threads field langsung)
-      - pk != comment_id && is_reply:true && (reply_level >= 2 atau rta matches)
+    Threads menaruh teks post di ``text_fragments[].plaintext`` dan field
+    ``pk`` / ``user`` berada jauh dari ``reply_to_author``, jadi parsing
+    di-anchor pada ``reply_to_author`` yang menunjuk ke akun kita lalu
+    field sisanya diambil dari window sekitarnya.
     """
     results = []
     seen_pks = set()
 
-    # Cari semua blok JSON yang mengandung "pk": "..." + caption
-    # Pattern: cari "pk":"<angka>" lalu ambil context sekitarnya
-    for m in _re.finditer(r'"pk"\s*:\s*"(\d+)"', html):
-        pk = m.group(1)
-        if pk == comment_id or pk in seen_pks:
+    anchor = _re.compile(
+        r'"reply_to_author"\s*:\s*\{[^}]*?"username"\s*:\s*"([^"]+)"'
+    )
+    for m in anchor.finditer(html):
+        if m.group(1).lower() != our_username.lower():
             continue
-        # Hanya ambil pk yang berukuran besar (media pk, bukan user_id)
-        if len(pk) < 15:
-            continue
-
         pos = m.start()
-        # Ambil window context untuk parsing fields
-        ctx_start = max(0, pos - 500)
-        ctx_end   = min(len(html), pos + 4000)
-        ctx       = html[ctx_start:ctx_end]
 
-        # Wajib ada is_reply:true
-        if '"is_reply":true' not in ctx and '"is_reply": true' not in ctx:
+        before = html[max(0, pos - 2500):pos]
+        after  = html[pos:pos + 4000]
+
+        # Teks balasan: field plaintext di text_fragments node ini
+        txt_m = None
+        for tm in _re.finditer(r'"plaintext"\s*:\s*"((?:[^"\\]|\\.)*)"', before):
+            txt_m = tm
+        if not txt_m:
+            txt_m = _re.search(
+                r'"caption"\s*:\s*\{[^{}]*"text"\s*:\s*"((?:[^"\\]|\\.)*)"',
+                before, _re.DOTALL,
+            )
+        if not txt_m:
             continue
-
-        # Ambil reply_level (opsional, tapi lebih presisi)
-        rl_m = _re.search(r'"reply_level"\s*:\s*(\d+)', ctx)
-        reply_level = int(rl_m.group(1)) if rl_m else 1
-
-        # Ambil reply_to_author username
-        rta_m = _re.search(
-            r'"reply_to_author"\s*:\s*\{[^}]*"username"\s*:\s*"([^"]+)"', ctx
-        )
-        rta_username = rta_m.group(1) if rta_m else ""
-
-        # Filter: harus reply ke kita atau reply_level >= 2 (sub-reply) atau
-        # comment_id kita ada di context-nya
-        is_reply_to_us = (
-            rta_username.lower() == our_username.lower()
-            or (reply_level >= 2 and comment_id in ctx)
-        )
-        if not is_reply_to_us:
-            continue
-
-        # Ambil user yang reply
-        user_m = _re.search(r'"username"\s*:\s*"([^"]+)"', ctx)
-        commenter = user_m.group(1) if user_m else ""
-        if commenter.lower() == our_username.lower():
-            continue  # skip komentar kita sendiri
-
-        # Ambil caption/text
-        cap_m = _re.search(
-            r'"caption"\s*:\s*\{[^{}]*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]',
-            ctx, _re.DOTALL
-        )
-        if not cap_m:
-            # fallback: cari "text" dekat pk
-            cap_m = _re.search(r'"text"\s*:\s*"((?:[^"\\]|\\.){5,200})"', ctx)
-        if not cap_m:
-            continue
-        text = cap_m.group(1).replace("\\n", "\n").replace('\\"', '"').strip()
+        raw = txt_m.group(1)
+        try:
+            text = json.loads('"' + raw + '"')
+        except Exception:
+            text = raw.replace("\\n", "\n").replace('\\"', '"')
+        text = text.strip()
         if not text:
             continue
 
-        # Ambil taken_at kalau ada
-        ta_m  = _re.search(r'"taken_at"\s*:\s*(\d+)', ctx)
-        taken = int(ta_m.group(1)) if ta_m else 0
+        # pk balasan: media pk terakhir sebelum anchor
+        pk_m = None
+        for pm in _re.finditer(r'"pk"\s*:\s*"(\d{15,})"', before):
+            pk_m = pm
+        if not pk_m:
+            continue
+        reply_id = pk_m.group(1)
+        if reply_id == comment_id or reply_id in seen_pks:
+            continue
 
-        seen_pks.add(pk)
+        # Penulis balasan: username di dalam objek "user" sesudah anchor
+        commenter = ""
+        um = _re.search(r'"user"\s*:\s*\{', after)
+        if um:
+            au = _re.search(
+                r'"username"\s*:\s*"([^"]+)"', after[um.start():um.start() + 3000]
+            )
+            if au:
+                commenter = au.group(1)
+        if not commenter or commenter.lower() == our_username.lower():
+            continue
+
+        ta_m = _re.search(r'"taken_at"\s*:\s*(\d+)', before + after[:500])
+        seen_pks.add(reply_id)
         results.append({
-            "reply_id":  pk,
+            "reply_id":  reply_id,
             "commenter": commenter,
             "text":      text,
-            "taken_at":  taken,
+            "taken_at":  int(ta_m.group(1)) if ta_m else 0,
         })
 
     return results
@@ -416,6 +408,11 @@ def main():
     if not llm_router.is_available():
         print("[ERROR] Qoder CLI tidak ditemukan.")
         sys.exit(1)
+    print("[INFO] Mengecek koneksi Qoder CLI…")
+    if not llm_router.ping():
+        print("[ERROR] Qoder CLI tidak merespons saat startup. Cek login & koneksi internet.")
+        sys.exit(1)
+    print("[INFO] Qoder CLI OK.")
 
     our_username = os.getenv("THREADS_USERNAME", "").strip()
     if not our_username:
