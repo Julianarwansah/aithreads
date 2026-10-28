@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config_loader
+import comment_memory
 import llm_router
 import reply_cache
 import stats_tracker
@@ -63,6 +64,12 @@ BASE_HEADERS = {
 
 _post_history: list[str] = []
 
+# Topik config terakhir yang dipilih pick_topic(). Sengaja cuma di memori proses:
+# poster jalan sebagai satu loop panjang, jadi ini cukup untuk mencegah dua postingan
+# berturut-turut pakai topik yang sama persis tanpa perlu menambah file state baru.
+# Restart proses mengosongkannya — tidak masalah, ini cuma penghalus variasi.
+_last_topic: str = ""
+
 DEFAULT_TOPICS = [
     "ngoding dan debugging",
     "AI dan tools terbaru",
@@ -70,6 +77,137 @@ DEFAULT_TOPICS = [
     "tech opinion",
     "startup dan produk digital",
 ]
+
+
+# ── pemilihan topik berbobot engagement ───────────────────────────────────────
+# Pemilihan tetap acak, hanya bobotnya yang digeser data. Lantai bobot di atas 0 ini
+# yang menjamin tidak ada topik yang kelaparan permanen: "selalu pilih yang terbaik"
+# akan mengunci bot di satu topik karena kebetulan awal dan menutup peluang menemukan
+# topik bagus yang datanya belum terkumpul.
+_TOPIC_NEUTRAL      = 1.0
+_TOPIC_WEIGHT_FLOOR = 0.35
+_TOPIC_WEIGHT_CAP   = 3.0
+
+
+def _topic_engagement() -> tuple[dict, float]:
+    """
+    Rate per topic_bucket + rate keseluruhan sebagai pembanding.
+    Gagal baca memory → ({}, 0.0), artinya semua topik dianggap netral.
+    """
+    try:
+        stats    = comment_memory.get_topic_engagement_stats() or {}
+        by_topic = stats.get("by_topic") or {}
+        total    = sum(int(v.get("total", 0) or 0)   for v in by_topic.values())
+        engaged  = sum(int(v.get("engaged", 0) or 0) for v in by_topic.values())
+        return by_topic, (engaged / total if total else 0.0)
+    except Exception as e:
+        logger.warning("Gagal baca statistik topik (%s) — pakai acak merata.", e)
+        return {}, 0.0
+
+
+def _topic_weight(bucket: str, by_topic: dict, baseline: float) -> float:
+    """
+    Bobot satu topic_bucket.
+
+    Netral kalau sampelnya belum mencapai comment_memory.MIN_TOPIC_SAMPLES, atau kalau
+    bucket-nya "misc" — misc adalah bucket penampung default berisi topik campur aduk,
+    jadi rate-nya tidak mengatakan apa pun soal satu topik config tertentu.
+    Selain itu bobot naik/turun mengikuti selisih rate bucket terhadap rate keseluruhan.
+
+    Semua jalur error balik ke netral: pemilihan topik tidak boleh bisa menjatuhkan
+    siklus posting.
+    """
+    try:
+        info  = by_topic.get(bucket) or {}
+        total = int(info.get("total", 0) or 0)
+
+        if total < comment_memory.MIN_TOPIC_SAMPLES or bucket == "misc":
+            return _TOPIC_NEUTRAL
+
+        rate = float(info.get("rate", 0.0) or 0.0)
+        if baseline <= 0:
+            return _TOPIC_NEUTRAL
+
+        lift = (rate - baseline) / baseline
+        return max(_TOPIC_WEIGHT_FLOOR, min(_TOPIC_WEIGHT_CAP, _TOPIC_NEUTRAL + lift))
+    except Exception:
+        return _TOPIC_NEUTRAL
+
+
+def _pick_weighted(pool: list) -> str:
+    """Inti pemilihan berbobot + log keputusannya. Dipanggil dari pick_topic()."""
+    global _last_topic
+
+    by_topic, baseline = _topic_engagement()
+
+    weights, breakdown = [], []
+    for t in pool:
+        bucket = comment_memory._detect_topic_bucket(t)
+        w      = _topic_weight(bucket, by_topic, baseline)
+        n      = int((by_topic.get(bucket) or {}).get("total", 0) or 0)
+        weights.append(w)
+        breakdown.append(f"'{t}'→{bucket} n={n} bobot={w:.2f}")
+
+    # Jangan ulang topik yang sama persis dua kali berturut-turut selama masih ada
+    # alternatif. Topik yang dilewati otomatis balik ke pool di siklus berikutnya.
+    candidates, cand_weights = pool, weights
+    if _last_topic and len(pool) > 1:
+        alt = [(t, w) for t, w in zip(pool, weights) if t != _last_topic]
+        if alt:
+            candidates, cand_weights = [a[0] for a in alt], [a[1] for a in alt]
+
+    chosen     = random.choices(candidates, weights=cand_weights, k=1)[0]
+    _last_topic = chosen
+
+    bucket = comment_memory._detect_topic_bucket(chosen)
+    info   = by_topic.get(bucket) or {}
+    n      = int(info.get("total", 0) or 0)
+    if bucket == "misc":
+        detail = f"bucket misc = netral, n={n}"
+    elif n >= comment_memory.MIN_TOPIC_SAMPLES:
+        detail = f"bucket {bucket} rate {float(info.get('rate', 0.0) or 0.0):.0%}, n={n}"
+    else:
+        detail = f"bucket {bucket} sampel kurang n={n} → netral"
+    print(f"[TOPIK] pilih '{chosen}' ({detail}) dari {len(pool)} kandidat")
+
+    if any(abs(w - _TOPIC_NEUTRAL) > 1e-9 for w in weights):
+        print(f"[TOPIK] bobot (baseline rate {baseline:.0%}): {' · '.join(breakdown)}")
+    else:
+        print(f"[TOPIK] data engagement belum cukup "
+              f"(perlu ≥{comment_memory.MIN_TOPIC_SAMPLES} sampel per bucket) — acak merata")
+
+    return chosen
+
+
+def pick_topic(topics: list = None) -> str:
+    """
+    Pilih satu topik dari daftar config: acak berbobot engagement, bukan acak murni.
+
+    String topik dipetakan ke topic_bucket lewat comment_memory._detect_topic_bucket()
+    (regex bucket tidak diduplikasi di sini), lalu bucket yang engagement rate-nya
+    menyimpang dari rata-rata diberi bobot lebih tinggi/rendah — tapi hanya kalau
+    sampelnya sudah cukup. Data tipis atau memory bermasalah → acak merata, persis
+    perilaku lama.
+
+    Pemilihan topik tidak pernah boleh menjatuhkan siklus posting, jadi kegagalan apa
+    pun di jalur berbobot jatuh ke acak merata.
+    """
+    global _last_topic
+
+    pool = [t for t in (topics if isinstance(topics, (list, tuple)) else DEFAULT_TOPICS)
+            if isinstance(t, str) and t.strip()]
+    if not pool:
+        pool = [t for t in DEFAULT_TOPICS if isinstance(t, str) and t.strip()]
+    if not pool:
+        return ""
+
+    try:
+        return _pick_weighted(pool)
+    except Exception as e:
+        logger.warning("Pemilihan topik berbobot gagal (%s) — pakai acak merata.", e)
+        chosen      = random.choice(pool)
+        _last_topic = chosen
+        return chosen
 
 
 # ── scanner ───────────────────────────────────────────────────────────────────
@@ -161,13 +299,13 @@ def generate_thread_content(session) -> str:
     except Exception:
         pass
 
-    # 2. Pilih topik referensi: dari tren kalau ada, atau random dari list
+    # 2. Pilih topik referensi: dari tren kalau ada, atau dipilih berbobot dari list
     if trend_posts:
         # Ambil kata kunci kasar dari caption postingan paling ramai
         top_caption = trend_posts[0]["caption"]
         topic_hint  = top_caption[:80]
     else:
-        topic_hint = random.choice(topics)
+        topic_hint = pick_topic(topics)
 
     recent = "\n".join(f"- {p}" for p in _post_history) if _post_history else "(belum ada postingan sebelumnya)"
 

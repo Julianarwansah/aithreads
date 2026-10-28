@@ -66,11 +66,36 @@ def _is_alive(pidfile):
         pass
     return True
 
+_MAX_LOG_BYTES = 5 * 1024 * 1024
+
+def _prepare_log(logfile, script):
+    """
+    Siapkan file log untuk proses baru: append, bukan truncate.
+
+    Dulu file dikosongkan tiap start, jadi riwayat tepat sebelum crash hilang
+    persis saat paling dibutuhkan untuk debugging. Ukuran tetap dibatasi supaya
+    log tidak tumbuh tanpa batas.
+    """
+    try:
+        if os.path.getsize(logfile) > _MAX_LOG_BYTES:
+            open(logfile, "w").close()
+    except OSError:
+        pass
+    try:
+        with open(logfile, "ab") as f:
+            f.write(
+                f"\n{'=' * 60}\n"
+                f"[START] {os.path.basename(script)} — {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                f"{'=' * 60}\n".encode()
+            )
+    except OSError:
+        pass
+
 def _launch(script, logfile, pidfile, extra_env=None):
     if _is_alive(pidfile):
         return {"ok": False, "msg": "Sudah berjalan"}
     os.makedirs(os.path.dirname(logfile), exist_ok=True)
-    open(logfile, "w").close()
+    _prepare_log(logfile, script)
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     if extra_env:
         env.update(extra_env)
@@ -119,8 +144,20 @@ _watchdog_restart_count = 0
 
 def _watchdog_loop():
     global _watchdog_restart_count
+    tick = 0
     while True:
         time.sleep(30)
+        tick += 1
+        # Heartbeat tiap 5 menit, bukan tiap tick. stats.json ikut ditulis oleh
+        # daemon lain dari proses berbeda dan lock stats_tracker hanya berlaku
+        # per-proses, jadi makin sering kita menulis makin besar peluang menimpa
+        # increment (comments_sent dll) yang baru mereka catat.
+        if tick % 10 == 0:
+            try:
+                import stats_tracker
+                stats_tracker.update_heartbeat(time.time())
+            except Exception:
+                pass
         cfg = config_loader.load()
         if not cfg.get("watchdog_enabled", True):
             continue
@@ -2959,6 +2996,11 @@ class Handler(BaseHTTPRequestHandler):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    try:
+        import stats_tracker
+        stats_tracker.init_system_start()
+    except Exception:
+        pass
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"ThreadScope Dashboard  →  http://localhost:{PORT}")
     print("Ctrl+C untuk berhenti.")

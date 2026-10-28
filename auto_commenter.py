@@ -1251,6 +1251,7 @@ def process_timeline(session):
     except Exception:
         app_mode = os.getenv("APP_MODE", "normal").lower()
 
+    trend_picked = False
     if app_mode == "trend":
         stats_tracker.increment("trend_posts_found")
         trend_candidates = [
@@ -1270,12 +1271,17 @@ def process_timeline(session):
             print(f"[TREND_REPLY_COUNT] {top.get('reply_count', 0)}")
 
             posts = [top]
+            trend_picked = True
         else:
             stats_tracker.increment("trend_fallbacks")
-            print("[TREND_FALLBACK] Tidak ada postingan yang lolos kriteria, pakai urutan acak.")
-            random.shuffle(posts)
-    else:
-        # Normal mode: LLM score top-5 candidates lalu urutkan
+            print("[TREND_FALLBACK] Tidak ada yang lolos kriteria — pakai scoring engagement.")
+
+    if not trend_picked:
+        # Scoring engagement: jalan untuk mode normal, sekaligus jadi fallback mode trend.
+        # Fallback ini dulunya random.shuffle, yang membuang sinyal likes/replies yang
+        # sudah tersedia. Di akun ini mode trend terukur 100% fallback — post IT/AI yang
+        # lolos likes>=30 & replies>=3 praktis tidak ada karena post ramai di timeline
+        # biasanya bukan post IT/AI dan sudah tersaring lebih dulu oleh filter kata kunci.
         pre_sort = sorted(
             posts,
             key=lambda p: (p.get("like_count") or 0) + (p.get("reply_count") or 0) * 3,

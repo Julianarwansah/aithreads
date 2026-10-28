@@ -70,6 +70,15 @@ def _is_negative_reply(text: str) -> bool:
     return any(sig in low for sig in _NEGATIVE_REPLY_SIGNALS)
 
 
+def _normalize_username(username: str) -> str:
+    """Samakan format username untuk perbandingan: buang "@"/spasi, huruf kecil.
+
+    Entri di config bisa tersimpan apa adanya (jalur _auto_blacklist yang lama menulis
+    username mentah, mis. "Budi_Santoso"), jadi kedua sisi harus dinormalisasi.
+    """
+    return (username or "").strip().lstrip("@").strip().lower()
+
+
 _blacklist_lock = threading.Lock()
 
 def _auto_blacklist(username: str):
@@ -461,6 +470,8 @@ def check_and_reply(session, our_username: str):
     cfg              = config_loader.load()
     classify_enabled = bool(cfg.get("reply_classify_enabled", True))
     blacklist_impolite = bool(cfg.get("auto_blacklist_impolite", False))
+    # Entri kosong / "@" ternormalisasi jadi "" — dibuang supaya tidak ikut match
+    blacklisted = {_normalize_username(u) for u in cfg.get("blacklisted_accounts", [])} - {""}
 
     for entry in trackable:
         comment_id  = entry["comment_id"]
@@ -482,6 +493,13 @@ def check_and_reply(session, our_username: str):
                 continue
 
             print(f"  [WATCHER] @{commenter} balas: {reply_text[:60]}…")
+
+            # Dicek paling awal: akun yang diblokir user tidak boleh dibalas sama sekali,
+            # jadi tidak perlu lewat guard keyword maupun klasifikasi LLM (~10 detik).
+            if _normalize_username(commenter) in blacklisted:
+                print(f"  [WATCHER] @{commenter} di-blacklist — skip")
+                _mark_replied(rid, "BLACKLISTED")
+                continue
 
             if _is_negative_reply(reply_text):
                 print(f"  [WATCHER] ⚠ Reply negatif dari @{commenter} — blacklist & skip")

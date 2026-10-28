@@ -29,6 +29,12 @@ MAX_REJECTED  = 50
 # diperlakukan netral — bukan dianggap buruk.
 MIN_SCORE_FALLBACK = 6      # sama dengan DEFAULTS config_loader.quality_min_score
 
+# Jumlah sampel minimum sebelum sebuah topic_bucket boleh dipakai mengambil keputusan.
+# Sama dengan ambang "total >= 3" yang sudah dipakai get_engagement_stats() untuk
+# best_style/best_sentiment: data engagement di sini tipis, jadi kesimpulan dari 1-2
+# titik data jauh lebih sering salah daripada benar.
+MIN_TOPIC_SAMPLES = 3
+
 
 def _cfg_int(key: str, default: int) -> int:
     """Baca config int. Import di dalam fungsi + try/except: module ini dipakai banyak
@@ -74,13 +80,16 @@ def _detect_style(text: str) -> str:
 
 # ── topic bucket detection ────────────────────────────────────────────────────
 _TOPIC_BUCKETS = {
-    "debugging":  r'\b(error|bug|debug|stuck|crash|exception|traceback|fix|solve)\b',
-    "deployment": r'\b(deploy|ci/cd|docker|kubernetes|server|production|staging|pipeline)\b',
+    # \bdebug\b tidak pernah cocok dengan "debugging" (word boundary menolak huruf
+    # sesudahnya), jadi varian morfologi dipakai lewat \w*. Tanpa ini sebagian besar
+    # postingan/komentar jatuh ke "misc" dan tidak pernah dapat sinyal engagement.
+    "debugging":  r'\b(error|bug\w*|debug\w*|stuck|crash\w*|exception|traceback|fix\w*|solve\w*)\b',
+    "deployment": r'\b(deploy\w*|ci/cd|docker|kubernetes|server|production|staging|pipeline)\b',
     "ai_tools":   r'\b(ai|llm|chatgpt|gpt|claude|copilot|ml|model|prompt|dataset)\b',
     "learning":   r'\b(belajar|tutorial|course|bootcamp|pemula|newbie|ngerti|paham)\b',
-    "career":     r'\b(kerja|karir|salary|gaji|interview|job|freelance|remote|hiring)\b',
-    "tools":      r'\b(vscode|vim|git|github|linux|terminal|framework|library|stack)\b',
-    "opinion":    r'\b(menurut|tbh|ngl|sebenarnya|kayaknya|gue rasa|hot take|unpopular)\b',
+    "career":     r'\b(kerja\w*|pekerjaan|karir|salary|gaji|interview|job|freelance|remote|hiring)\b',
+    "tools":      r'\b(vscode|vim|git|github|linux|terminal|framework|library|stack|tools?)\b',
+    "opinion":    r'\b(menurut\w*|opini|opinion|pendapat|tbh|ngl|sebenarnya|kayaknya|gue rasa|hot take|unpopular)\b',
 }
 
 def _detect_topic_bucket(caption: str) -> str:
@@ -431,6 +440,55 @@ def get_engagement_stats() -> dict:
         "by_sentiment":  by_sentiment,
         "best_style":    best_style,
         "best_sentiment": best_sent,
+    }
+
+
+def get_topic_engagement_stats() -> dict:
+    """
+    Hitung engagement rate per topic_bucket — versi topik dari get_engagement_stats().
+    Return: {
+      "by_topic":   {"ai_tools": {"total": 54, "engaged": 13, "rate": 0.24}, ...},
+      "best_topic": "ai_tools",
+    }
+
+    Entri lama yang tidak punya field topic_bucket dihitung sebagai "misc" (default
+    _detect_topic_bucket) supaya tidak ada data yang terbuang. Bucket tak dikenal
+    (mis. pola _TOPIC_BUCKETS berubah) tetap dilaporkan apa adanya.
+
+    "misc" ikut ada di by_topic, tapi tidak pernah jadi best_topic: itu bucket
+    penampung default yang isinya campur aduk, bukan label topik — alasan yang sama
+    dengan get_overused_topic() mengecualikannya.
+    """
+    with _lock:
+        data = _load()
+
+    if not data:
+        return {}
+
+    by_topic = {b: {"total": 0, "engaged": 0} for b in list(_TOPIC_BUCKETS) + ["misc"]}
+
+    for e in data:
+        topic = e.get("topic_bucket") or "misc"
+        if topic not in by_topic:
+            by_topic[topic] = {"total": 0, "engaged": 0}
+        by_topic[topic]["total"] += 1
+        if bool(e.get("engaged")):
+            by_topic[topic]["engaged"] += 1
+
+    for v in by_topic.values():
+        v["rate"] = round(v["engaged"] / v["total"], 2) if v["total"] > 0 else 0.0
+
+    # Best performer (minimal MIN_TOPIC_SAMPLES total untuk dianggap valid)
+    best_topic = max(
+        (b for b in by_topic
+         if b != "misc" and by_topic[b]["total"] >= MIN_TOPIC_SAMPLES),
+        key=lambda b: by_topic[b]["rate"],
+        default="",
+    )
+
+    return {
+        "by_topic":   by_topic,
+        "best_topic": best_topic,
     }
 
 
